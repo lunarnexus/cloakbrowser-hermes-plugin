@@ -1,0 +1,5 @@
+name: cloakbrowser-hermes-plugin
+version: 0.1.0
+description: "Auto-launch headed CloakBrowser for Hermes browser_* tools, with persistent profile state and /cloak connect|disconnect|status commands."
+author: LunarNexus
+kind: standalone
