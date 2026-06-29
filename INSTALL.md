@@ -23,13 +23,34 @@ git clone -b fix/remove-backend-kwarg https://github.com/lunarnexus/cloakbrowser
 cd ~/workspace/cloakbrowser-mcp
 python3 -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip
-./.venv/bin/pip install -e ./cloakbrowser-mcp
+./.venv/bin/pip install -e .
 ```
+
+This repo's `pyproject.toml` lives at the repo root, so the editable install target is `.`.
 
 ## 2) Register the MCP server in Hermes
 
 ```bash
 hermes mcp add cloakbrowser \
+  --command "$HOME/workspace/cloakbrowser-mcp/.venv/bin/cloakbrowser-mcp" \
+  --args --caps all
+```
+
+Notes:
+- `hermes mcp add` prompts to enable the discovered tools. Answer `y` to enable all tools.
+- Headed CloakBrowser needs the desktop session env. If Hermes strips GUI vars from the MCP child, add dynamic env passthrough:
+
+```bash
+hermes config set mcp_servers.cloakbrowser.env.DISPLAY '${DISPLAY}'
+hermes config set mcp_servers.cloakbrowser.env.DBUS_SESSION_BUS_ADDRESS '${DBUS_SESSION_BUS_ADDRESS}'
+hermes config set mcp_servers.cloakbrowser.env.XAUTHORITY '${XAUTHORITY}'
+```
+
+Run those from the same desktop session used to start Hermes; do not hard-code display numbers like `:10.0`.
+- In non-interactive automation, feed `y` on stdin:
+
+```bash
+printf 'y\n' | hermes mcp add cloakbrowser \
   --command "$HOME/workspace/cloakbrowser-mcp/.venv/bin/cloakbrowser-mcp" \
   --args --caps all
 ```
@@ -47,6 +68,17 @@ hermes mcp test cloakbrowser
 hermes plugins install https://github.com/lunarnexus/cloakbrowser-hermes-plugin.git --enable
 ```
 
+If you already have the repo checked out locally and want Hermes to use that workspace copy directly:
+
+```bash
+mkdir -p ~/.hermes/profiles/<profile>/plugins
+ln -sfn ~/workspace/cloakbrowser-hermes-plugin \
+  ~/.hermes/profiles/<profile>/plugins/cloakbrowser-hermes-plugin
+hermes plugins enable cloakbrowser-hermes-plugin
+```
+
+Replace `<profile>` with your Hermes profile name. Plugin changes take effect in a new session.
+
 Verify:
 
 ```bash
@@ -59,6 +91,18 @@ hermes plugins list
 hermes skills install https://raw.githubusercontent.com/lunarnexus/ai-skills/master/cloakbrowser/SKILL.md
 hermes skills install https://raw.githubusercontent.com/lunarnexus/ai-skills/master/reddit-research/SKILL.md
 ```
+
+If you already have `~/workspace/ai-skills` locally and want to use those workspace copies directly:
+
+```bash
+mkdir -p ~/.hermes/profiles/<profile>/skills
+ln -sfn ~/workspace/ai-skills/cloakbrowser \
+  ~/.hermes/profiles/<profile>/skills/cloakbrowser
+ln -sfn ~/workspace/ai-skills/reddit-research \
+  ~/.hermes/profiles/<profile>/skills/reddit-research
+```
+
+Replace `<profile>` with your Hermes profile name.
 
 Verify:
 
