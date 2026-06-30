@@ -65,6 +65,7 @@ def _require_mcp(ctx) -> None:
         "mcp_cloakbrowser_browser_launch",
         "mcp_cloakbrowser_browser_close",
         "mcp_cloakbrowser_browser_list_pages",
+        "mcp_cloakbrowser_browser_new_page",
         "mcp_cloakbrowser_browser_navigate",
         "mcp_cloakbrowser_browser_snapshot",
     ]
@@ -103,9 +104,40 @@ def _launch(ctx) -> dict[str, Any]:
         raise RuntimeError(str(launched["error"]))
     page_id = launched.get("page_id")
     if not page_id:
-        raise RuntimeError(f"Launch succeeded but returned no page_id: {launched}")
+        page_id = _adopt_or_create_page(ctx, launched)
     _remember(page_id, connected=True)
+    launched["page_id"] = page_id
     return launched
+
+
+def _page_id_from_rows(page_rows: list[Any]) -> str | None:
+    for row in page_rows:
+        if isinstance(row, dict) and row.get("page_id"):
+            return str(row["page_id"])
+    return None
+
+
+def _new_page(ctx) -> dict[str, Any]:
+    _require_mcp(ctx)
+    page = _dispatch(ctx, "mcp_cloakbrowser_browser_new_page", {})
+    if page.get("error"):
+        raise RuntimeError(str(page["error"]))
+    if not page.get("page_id"):
+        raise RuntimeError(f"New page succeeded but returned no page_id: {page}")
+    return page
+
+
+def _adopt_or_create_page(ctx, launch_result: dict[str, Any]) -> str:
+    page_rows = launch_result.get("pages") or launch_result.get("result") or []
+    if isinstance(page_rows, list):
+        page_id = _page_id_from_rows(page_rows)
+        if page_id:
+            return page_id
+
+    if launch_result.get("status") == "already_running":
+        return str(_new_page(ctx)["page_id"])
+
+    raise RuntimeError(f"Launch succeeded but returned no page_id: {launch_result}")
 
 
 def _list_pages(ctx) -> dict[str, Any]:
@@ -128,10 +160,10 @@ def _ensure_page(ctx) -> str:
         return str(page_id)
 
     if page_rows:
-        adopted = page_rows[0].get("page_id") if isinstance(page_rows[0], dict) else None
+        adopted = _page_id_from_rows(page_rows)
         if adopted:
-            _remember(str(adopted), connected=True)
-            return str(adopted)
+            _remember(adopted, connected=True)
+            return adopted
 
     if connected:
         _clear_state()
