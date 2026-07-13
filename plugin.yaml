@@ -1,5 +1,17 @@
 name: cloakbrowser-hermes-plugin
 version: 0.1.0
-description: "Auto-launch headed CloakBrowser for Hermes browser_* tools, with persistent profile state and /cloak connect|disconnect|status commands."
+description: "Direct-SDK CloakBrowser foundation for Hermes browser_* tool overrides."
 author: LunarNexus
 kind: standalone
+provides_tools:
+  - browser_navigate
+  - browser_snapshot
+  - browser_click
+  - browser_type
+  - browser_scroll
+  - browser_back
+  - browser_press
+  - browser_get_images
+  - browser_console
+provides_hooks: []
+requires_env: []
