@@ -13,5 +13,7 @@ provides_tools:
   - browser_press
   - browser_get_images
   - browser_console
+  - browser_dialog
+  - browser_vision
 provides_hooks: []
 requires_env: []
