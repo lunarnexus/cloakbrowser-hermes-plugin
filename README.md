@@ -1,129 +1,94 @@
 # cloakbrowser-hermes-plugin
 
-Hermes plugin that makes the built-in `browser_*` tool family run through the ColorSource CloakBrowser MCP server.
+Direct-SDK Hermes plugin foundation for routing the built-in `browser_*` tool family through the ColorSource CloakBrowser Python SDK.
 
-Behavior:
-- `browser_*` overrides are active whenever this plugin is enabled.
-- First browser action auto-launches a headed CloakBrowser window.
-- `/cloak connect` is optional prewarm.
-- `/cloak disconnect` closes the current CloakBrowser session.
-- The persistent browser profile lives at:
-  - `~/.hermes/profiles/<profile>/browser-profiles/cloakbrowser`
-
-This plugin is designed for local desktop Hermes installs where you want a visible browser window, manual login, and persistent session state.
+Current foundation behavior:
+- Registers `/cloak status` and `/cloak help`.
+- Overrides `browser_*` tools only when config is valid and the `cloakbrowser` Python package is importable.
+- Does not launch a browser yet; tool handlers fail closed with a safe placeholder error in this slice.
+- Redacts local profile paths from status output.
+- Uses a dedicated persistent profile directory by default under the active Hermes profile.
 
 ## Requirements
 
-1. Hermes with plugin support.
-2. A configured CloakBrowser MCP server named `cloakbrowser`.
-3. A desktop session (headed browser mode).
+1. Hermes Agent with plugin support.
+2. Python package `cloakbrowser` installed in the same environment that runs Hermes.
+3. A local desktop session for future headed browser slices.
 
-## MCP setup
+## Install
 
-Example install flow for the ColorSource MCP server:
-
-1. Clone/install the MCP server in a Python virtualenv.
-2. Register it with Hermes:
-
-```bash
-hermes mcp add cloakbrowser \
-  --command /absolute/path/to/venv/bin/cloakbrowser-mcp \
-  --args --caps all
-```
-
-3. Restart Hermes or run `/reload-mcp` in a fresh session.
-
-Verify:
-
-```bash
-hermes mcp list
-```
-
-You should see the `cloakbrowser` server registered.
-
-## Plugin install
-
-There are two practical installation paths.
-
-### Option A: install from git
-
-Hermes installs plugins from git repositories:
-
-```bash
-hermes plugins install <git-url-or-owner/repo> --enable
-```
-
-Once this repo is published, install it directly from GitHub, for example:
+Use the official Hermes plugin workflow:
 
 ```bash
 hermes plugins install https://github.com/<owner>/cloakbrowser-hermes-plugin.git --enable
 ```
 
-Or with GitHub shorthand:
+Or, after the repository is published under GitHub shorthand:
 
 ```bash
 hermes plugins install <owner>/cloakbrowser-hermes-plugin --enable
 ```
 
-### Option B: local development install from a workspace checkout
+Start a new Hermes session after enabling the plugin.
 
-Hermes discovers user plugins under the active profile directory.
+## Local development install
 
-Example:
+For a workspace checkout, install or link the plugin using the Hermes plugin workflow for your active profile. Example development layout:
+
+```bash
+hermes plugins install /absolute/path/to/cloakbrowser-hermes-plugin --enable
+```
+
+If your Hermes version does not support local path installs, place the checkout under the active profile plugin directory and enable it:
 
 ```bash
 mkdir -p ~/.hermes/profiles/<profile>/plugins
-ln -sfn ~/workspace/cloakbrowser-hermes-plugin \
+ln -sfn /absolute/path/to/cloakbrowser-hermes-plugin \
   ~/.hermes/profiles/<profile>/plugins/cloakbrowser-hermes-plugin
 hermes plugins enable cloakbrowser-hermes-plugin
 ```
 
-Then start a new Hermes session.
+Replace `<profile>` with the Hermes profile you intend to use. Plugin changes take effect in a new session.
 
-Notes:
-- `hermes plugins enable` updates config, but the plugin loads on the next session.
-- Replace `<profile>` with your Hermes profile name.
-- Repeat the same process under `~/.hermes/profiles/<name>/plugins/` on any other machine or profile.
+## Configuration
+
+Configure runtime options under the plugin entry:
+
+```yaml
+plugins:
+  entries:
+    cloakbrowser-hermes-plugin:
+      enabled: true
+      config:
+        user_data_dir: ~/.hermes/profiles/<profile>/browser-profiles/cloakbrowser
+        headless: false
+        humanize: true
+        human_preset: default
+        stealth_args: true
+        geoip: false
+        proxy: null
+        locale: null
+        timezone: null
+        color_scheme: null
+        user_agent: null
+        args: []
+```
+
+`user_data_dir` must be a dedicated CloakBrowser profile directory. The plugin rejects dangerous locations such as `/`, the home directory, the repository root, common browser profile directories, symlinked paths, and other Hermes profile directories outside the current profile-owned CloakBrowser path.
 
 ## Usage
 
-Once enabled, use Hermes normally with the standard browser tools.
-
-Examples:
-
-```text
-browser_navigate(url="https://example.com")
-browser_snapshot(full=false)
-browser_click(ref="@e1")
-```
-
-Slash commands:
+Slash commands in this foundation slice:
 
 ```text
 /cloak status
-/cloak connect
-/cloak disconnect
+/cloak help
 ```
 
-Meaning:
-- `/cloak status` shows plugin/browser state.
-- `/cloak connect` launches the browser immediately.
-- `/cloak disconnect` closes the current CloakBrowser session.
-- After `/cloak disconnect`, the next `browser_*` call auto-launches again.
+`/cloak status` reports readiness and high-level state only. It does not print profile paths, session IDs, cookies, or URLs.
 
-## Reverting to stock Hermes browser behavior
+When enabled and ready, the plugin registers these built-in browser tool overrides:
 
-Disable the plugin:
-
-```bash
-hermes plugins disable cloakbrowser-hermes-plugin
-```
-
-Then start a new Hermes session.
-
-## Implementation notes
-
-The plugin overrides these built-in browser tools:
 - `browser_navigate`
 - `browser_snapshot`
 - `browser_click`
@@ -135,29 +100,15 @@ The plugin overrides these built-in browser tools:
 - `browser_console`
 
 It intentionally does not override:
+
 - `web_search`
 - `web_extract`
 - `browser_cdp`
 
-## MCP runtime layout
-
-This plugin expects a separately installed CloakBrowser MCP server.
-
-A typical local layout looks like:
-
-```text
-~/workspace/cloakbrowser-mcp/
-├── .venv/
-│   └── bin/cloakbrowser-mcp
-└── cloakbrowser-mcp/
-```
-
-The important part is that Hermes is configured to launch the MCP entrypoint from the virtualenv, for example:
+## Disable
 
 ```bash
-hermes mcp add cloakbrowser \
-  --command ~/workspace/cloakbrowser-mcp/.venv/bin/cloakbrowser-mcp \
-  --args --caps all
+hermes plugins disable cloakbrowser-hermes-plugin
 ```
 
-The plugin repository and the MCP runtime should remain separate projects.
+Then start a new Hermes session.
