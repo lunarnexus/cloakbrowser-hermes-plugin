@@ -99,6 +99,8 @@ When enabled and ready, the plugin registers these built-in browser tool overrid
 - `browser_press`
 - `browser_get_images`
 - `browser_console`
+- `browser_dialog`
+- `browser_vision`
 
 It intentionally does not override:
 

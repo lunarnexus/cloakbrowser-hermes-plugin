@@ -7,6 +7,7 @@ import ipaddress
 import json
 import re
 import socket
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -29,6 +30,7 @@ SECRET_PATTERNS = [
         r"\b((?:(?:access_)?token|api[_-]?key|secret|password|passwd|pwd|session|cookie|code)=)[^\s&#]+",
         re.I,
     ),
+    re.compile(r"\b(secret|password|passwd|pwd|cookie)[-_][A-Za-z0-9._~+/=-]+", re.I),
     re.compile(r"\b[A-Za-z0-9._%+-]+:[^\s/@]+@"),
 ]
 BLOCKED_HOSTS = {"localhost", "localhost.localdomain", "metadata.google.internal"}
@@ -103,6 +105,8 @@ class CloakBrowserAdapter:
                 "browser_press": self._press,
                 "browser_console": self._console,
                 "browser_get_images": self._get_images,
+                "browser_dialog": self._dialog,
+                "browser_vision": self._vision,
             }
             handler = handlers.get(tool_name)
             if handler is None:
@@ -262,6 +266,216 @@ class CloakBrowserAdapter:
                 continue
             safe_images.append(image)
         return {"images": safe_images}
+
+    def _dialog(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
+        self._assert_safe_page_url(getattr(page, "url", None))
+        dialog_store = getattr(page, "_cloak_dialogs", None)
+        dialogs = list(dialog_store or [])[-20:]
+        action = args.get("action")
+        if action:
+            if action not in {"accept", "dismiss"}:
+                raise ValueError("action must be accept or dismiss")
+            if not dialogs:
+                return {"handled": False, "count": 0, "dialogs": []}
+            index = int(args.get("index", -1))
+            dialog = dialogs[index]
+            handle = dialog.get("_handle") if isinstance(dialog, dict) else None
+            if handle is None:
+                return {"handled": False, "count": len(dialogs), "dialogs": self._public_dialogs(dialogs)}
+            if action == "accept":
+                accept = getattr(handle, "accept", None)
+                if not callable(accept):
+                    raise ValueError("dialog cannot be accepted")
+                prompt_text = args.get("prompt_text")
+                if prompt_text is None:
+                    self.run(accept())
+                else:
+                    self.run(accept(str(prompt_text)))
+            else:
+                dismiss = getattr(handle, "dismiss", None)
+                if not callable(dismiss):
+                    raise ValueError("dialog cannot be dismissed")
+                self.run(dismiss())
+            if isinstance(dialog, dict):
+                dialog["handled"] = True
+                dialog.pop("_handle", None)
+                handled_store = getattr(page, "_cloak_handled_dialogs", None)
+                append_handled = getattr(handled_store, "append", None)
+                if callable(append_handled):
+                    append_handled(dict(dialog))
+            remove_dialog = getattr(dialog_store, "remove", None)
+            if callable(remove_dialog):
+                try:
+                    remove_dialog(dialog)
+                except ValueError:
+                    pass
+            remaining = list(dialog_store or [])[-20:]
+            return {"handled": True, "action": action, "count": len(remaining)}
+        public = self._public_dialogs(dialogs)
+        return {
+            "count": len(public),
+            "latest": public[-1] if public else None,
+            "dialogs": public,
+        }
+
+    def _public_dialogs(self, dialogs: list[Any]) -> list[dict[str, Any]]:
+        public = []
+        for idx, dialog in enumerate(dialogs):
+            if not isinstance(dialog, dict):
+                continue
+            public.append(
+                {
+                    "index": idx,
+                    "type": dialog.get("type", "dialog"),
+                    "message": dialog.get("message", ""),
+                    "default_value": dialog.get("default_value", ""),
+                }
+            )
+        return public
+
+    def _vision(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
+        self._assert_safe_page_url(getattr(page, "url", None))
+        screenshot = getattr(page, "screenshot", None)
+        if not callable(screenshot):
+            raise ValueError("page does not support screenshots")
+        path = self._new_screenshot_path()
+        options = {
+            "path": str(path),
+            "type": "png",
+            "full_page": bool(args.get("full_page", False)),
+        }
+        self.run(screenshot(**options))
+        self._assert_safe_page_url(getattr(page, "url", None))
+        if not path.exists():
+            data = self.run(screenshot(type="png"))
+            if isinstance(data, bytes):
+                path.write_bytes(data)
+        annotated = False
+        labels: list[dict[str, Any]] = []
+        if args.get("annotate"):
+            labels = self._annotation_labels(page)
+            annotated = self._write_annotated_screenshot(path, labels)
+        result: dict[str, Any] = {
+            "ok": True,
+            "screenshot_path": str(path),
+            "mime_type": "image/png",
+            "annotated": annotated,
+        }
+        if args.get("annotate"):
+            result["labels"] = [label["ref"] for label in labels]
+            result["badge_to_ref"] = {str(label["badge"]): label["ref"] for label in labels}
+            if not annotated:
+                result["note"] = "No drawable interactive element bounds were available for annotation."
+        return result
+
+    def _new_screenshot_path(self) -> Path:
+        if self.manager is not None:
+            new_path = getattr(self.manager, "new_screenshot_path", None)
+            if callable(new_path):
+                path = new_path()
+                if isinstance(path, Path):
+                    return path
+                return Path(str(path))
+        raise RuntimeError("adapter has no screenshot temp lifecycle manager")
+
+    def _annotation_labels(self, page: Any) -> list[dict[str, Any]]:
+        ref_map = getattr(page, "_cloak_ref_map", {}) or {}
+        if not ref_map:
+            self._snapshot(page, {})
+            ref_map = getattr(page, "_cloak_ref_map", {}) or {}
+        refs = list(ref_map)[:99]
+        selectors = [str(ref_map[ref]) for ref in refs]
+        boxes = self._dom_bounding_boxes(page, selectors)
+        labels: list[dict[str, Any]] = []
+        for ref, box in zip(refs, boxes, strict=False):
+            if not isinstance(box, dict):
+                continue
+            width = float(box.get("width") or 0)
+            height = float(box.get("height") or 0)
+            if width <= 0 or height <= 0:
+                continue
+            labels.append(
+                {
+                    "ref": ref,
+                    "badge": self._annotation_badge_number(ref, len(labels) + 1),
+                    "x": max(0.0, float(box.get("x") or 0)),
+                    "y": max(0.0, float(box.get("y") or 0)),
+                    "width": width,
+                    "height": height,
+                }
+            )
+        return labels
+
+    def _annotation_badge_number(self, ref: str, fallback: int) -> int:
+        match = re.fullmatch(r"@e(\d+)", str(ref))
+        if match:
+            return int(match.group(1))
+        return fallback
+
+    def _dom_bounding_boxes(self, page: Any, selectors: list[str]) -> list[Any]:
+        if not selectors:
+            return []
+        script = """
+        (selectors) => selectors.map((selector) => {
+          try {
+            const node = document.querySelector(selector);
+            if (!node) return null;
+            const rect = node.getBoundingClientRect();
+            return {x: rect.left, y: rect.top, width: rect.width, height: rect.height};
+          } catch (_error) {
+            return null;
+          }
+        })
+        """
+        evaluate = getattr(page, "evaluate", None)
+        if not callable(evaluate):
+            return []
+        try:
+            return list(self.run(evaluate(script, selectors)) or [])
+        except TypeError:
+            selector_json = json.dumps(selectors)
+            fallback_script = f"""
+            () => {selector_json}.map((selector) => {{
+              try {{
+                const node = document.querySelector(selector);
+                if (!node) return null;
+                const rect = node.getBoundingClientRect();
+                return {{x: rect.left, y: rect.top, width: rect.width, height: rect.height}};
+              }} catch (_error) {{
+                return null;
+              }}
+            }})
+            """
+            return list(self.run(evaluate(fallback_script)) or [])
+
+    def _write_annotated_screenshot(self, path: Path, labels: list[dict[str, Any]]) -> bool:
+        if not labels:
+            return False
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            return False
+        try:
+            image = Image.open(path).convert("RGBA")
+            draw = ImageDraw.Draw(image)
+            font = ImageFont.load_default()
+            for label in labels:
+                x = int(label["x"])
+                y = int(label["y"])
+                width = int(label["width"])
+                height = int(label["height"])
+                draw.rectangle((x, y, x + width, y + height), outline=(255, 80, 0, 255), width=3)
+                text = str(label.get("badge") or "")
+                text_box = draw.textbbox((0, 0), text, font=font)
+                text_width = text_box[2] - text_box[0]
+                text_height = text_box[3] - text_box[1]
+                badge = (x, y, x + text_width + 8, y + text_height + 6)
+                draw.rounded_rectangle(badge, radius=4, fill=(255, 80, 0, 230))
+                draw.text((x + 4, y + 3), text, fill=(255, 255, 255, 255), font=font)
+            image.convert("RGB").save(path, format="PNG")
+            return True
+        except Exception:
+            return False
 
     def _selector(self, args: dict[str, Any]) -> str:
         selector = args.get("selector") or args.get("ref")

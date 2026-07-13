@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import atexit
+import shutil
+import tempfile
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +18,10 @@ except ImportError:
     from config import CloakConfig  # type: ignore[no-redef]
 
 MAX_CONSOLE_MESSAGES = 200
+MAX_DIALOGS = 20
+SCREENSHOT_TEMP_PREFIX = "cloakbrowser-vision-"
+SCREENSHOT_MARKER = ".cloakbrowser-hermes-plugin"
+OLD_SCREENSHOT_TEMP_MAX_AGE_SECONDS = 60 * 60
 
 
 @dataclass
@@ -43,10 +50,51 @@ class SessionManager:
         self.adapter = CloakBrowserAdapter(settings, self)
         self._contexts: dict[str, SharedBrowserContext] = {}
         self._sessions: dict[str, BrowserSession] = {}
+        self._screenshot_temp_dirs: set[Path] = set()
         self._creating_sessions: set[str] = set()
         self._closing = False
         self._closed = False
+        self.cleanup_screenshot_temp_dirs(include_active=True)
         atexit.register(self.close_all)
+
+    def new_screenshot_path(self) -> Path:
+        temp_dir = Path(tempfile.mkdtemp(prefix=SCREENSHOT_TEMP_PREFIX))
+        (temp_dir / SCREENSHOT_MARKER).write_text("cloakbrowser-hermes-plugin\n")
+        path = temp_dir / "screenshot.png"
+        with _CONTEXT_REGISTRY_CONDITION:
+            self._screenshot_temp_dirs.add(temp_dir)
+        return path
+
+    def cleanup_screenshot_temp_dirs(self, *, include_active: bool = False) -> None:
+        temp_root = Path(tempfile.gettempdir())
+        candidates: set[Path] = set()
+        with _CONTEXT_REGISTRY_CONDITION:
+            if include_active:
+                candidates.update(self._screenshot_temp_dirs)
+                self._screenshot_temp_dirs.clear()
+            candidates.update(
+                path
+                for path in temp_root.glob(f"{SCREENSHOT_TEMP_PREFIX}*")
+                if self._is_old_plugin_screenshot_temp_dir(path)
+            )
+        for path in candidates:
+            shutil.rmtree(path, ignore_errors=True)
+
+    def _is_old_plugin_screenshot_temp_dir(self, path: Path) -> bool:
+        if not self._is_plugin_screenshot_temp_dir(path):
+            return False
+        try:
+            return (time.time() - path.stat().st_mtime) >= OLD_SCREENSHOT_TEMP_MAX_AGE_SECONDS
+        except OSError:
+            return False
+
+    def _is_plugin_screenshot_temp_dir(self, path: Path) -> bool:
+        try:
+            if not path.is_dir() or not path.name.startswith(SCREENSHOT_TEMP_PREFIX):
+                return False
+            return (path / SCREENSHOT_MARKER).exists() or (path / "screenshot.png").exists()
+        except OSError:
+            return False
 
     def _context_key(self) -> str:
         return str(Path(self.settings.user_data_dir).expanduser().resolve())
@@ -93,6 +141,7 @@ class SessionManager:
             pages = list(getattr(context, "pages", []) or []) if claim_initial_page else []
             page = pages[0] if pages else context.new_page()
             self._attach_console_capture(page)
+            self._attach_dialog_capture(page)
             session = BrowserSession(context=context, page=page)
 
             with _CONTEXT_REGISTRY_CONDITION:
@@ -180,7 +229,38 @@ class SessionManager:
         on("console", capture)
         on("pageerror", capture_page_error)
 
+    def _attach_dialog_capture(self, page: Any) -> None:
+        dialogs: deque[dict[str, Any]] = deque(maxlen=MAX_DIALOGS)
+        setattr(page, "_cloak_dialogs", dialogs)
+        setattr(page, "_cloak_handled_dialogs", deque(maxlen=MAX_DIALOGS))
+        on = getattr(page, "on", None)
+        if not callable(on):
+            return
+
+        def attr(dialog: Any, name: str, default: str = "") -> str:
+            value = getattr(dialog, name, default)
+            if callable(value):
+                value = value()
+            return str(value or default)
+
+        def scrub(value: str, limit: int) -> str:
+            redacted = self.adapter._redact_text(value, limit=limit)
+            return "[REDACTED]" if "[REDACTED]" in redacted else redacted
+
+        def capture(dialog: Any) -> None:
+            dialogs.append(
+                {
+                    "type": scrub(attr(dialog, "type", "dialog"), 200),
+                    "message": scrub(attr(dialog, "message"), 4000),
+                    "default_value": scrub(attr(dialog, "default_value"), 1000),
+                    "_handle": dialog,
+                }
+            )
+
+        on("dialog", capture)
+
     def close_all(self) -> None:
+        self.cleanup_screenshot_temp_dirs(include_active=True)
         contexts_to_close: list[tuple[str, SharedBrowserContext]] = []
         with _CONTEXT_REGISTRY_CONDITION:
             if self._closing:
@@ -225,6 +305,7 @@ class SessionManager:
         with _CONTEXT_REGISTRY_CONDITION:
             self._closing = False
             _CONTEXT_REGISTRY_CONDITION.notify_all()
+        self.cleanup_screenshot_temp_dirs(include_active=True)
 
     def status(self) -> dict[str, object]:
         return {

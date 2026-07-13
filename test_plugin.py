@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 import types
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -21,6 +24,8 @@ BROWSER_NAMES = [
     "browser_press",
     "browser_get_images",
     "browser_console",
+    "browser_dialog",
+    "browser_vision",
 ]
 
 
@@ -241,6 +246,28 @@ class FakePage:
             {"src": "blob:https://example.test/id", "alt": "blob"},
             {"src": "http://127.0.0.1/a.png", "alt": "private"},
         ]
+        self.listeners = {}
+        self.screenshots = []
+
+    def on(self, event, handler):
+        self.listeners.setdefault(event, []).append(handler)
+
+    def emit(self, event, payload):
+        for handler in self.listeners.get(event, []):
+            handler(payload)
+
+    def screenshot(self, **kwargs):
+        self.screenshots.append(kwargs)
+        path = kwargs.get("path")
+        from PIL import Image
+
+        image = Image.new("RGB", (100, 100), "white")
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        data = buffer.getvalue()
+        if path:
+            Path(path).write_bytes(data)
+        return data
 
     def goto(self, url, wait_until="load"):
         self.url = url
@@ -261,7 +288,15 @@ class FakePage:
         self.url = "about:previous"
         return types.SimpleNamespace(status=200, ok=True)
 
-    def evaluate(self, script):
+    def evaluate(self, script, *args):
+        if args and "getBoundingClientRect" in script:
+            selectors = args[0]
+            boxes = {
+                "#go": {"x": 12, "y": 18, "width": 44, "height": 24},
+                'internal:role=WebArea[name="Fake page"]': {"x": 0, "y": 0, "width": 100, "height": 100},
+                'internal:role=button[name="Go"]': {"x": 12, "y": 18, "width": 44, "height": 24},
+            }
+            return [boxes.get(selector) for selector in selectors]
         if "document.body.innerText" in script:
             return "Fake text"
         if "document.images" in script:
@@ -271,6 +306,21 @@ class FakePage:
         if script == "() => 'token=secret'":
             return "token=secret"
         return None
+
+
+class FakeDialog:
+    def __init__(self, message="token=secret", dialog_type="prompt", default_value="secret-default"):
+        self.message = message
+        self.type = dialog_type
+        self.default_value = default_value
+        self.accepted = []
+        self.dismissed = False
+
+    def accept(self, prompt_text=None):
+        self.accepted.append(prompt_text)
+
+    def dismiss(self):
+        self.dismissed = True
 
 
 class FakeBrowserContext:
@@ -360,6 +410,199 @@ def test_browser_handlers_perform_direct_sdk_operations(plugin, monkeypatch, tmp
             "height": 20,
         }
     ]
+
+
+def test_browser_dialog_captures_bounded_dialogs_and_actions(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="dialog-task")
+    page = FakeBrowserContext.created[0].pages[0]
+    first = FakeDialog(message="first token=secret", dialog_type="alert")
+    last = FakeDialog(message="last token=secret", dialog_type="prompt")
+
+    for idx in range(25):
+        page.emit("dialog", FakeDialog(message=f"old-{idx}"))
+    page.emit("dialog", first)
+    page.emit("dialog", last)
+
+    listing = json.loads(handlers["browser_dialog"]({}, task_id="dialog-task"))
+    assert listing["count"] == 20
+    assert listing["latest"]["message"] == "[REDACTED]"
+    assert "secret" not in json.dumps(listing)
+
+    accepted = json.loads(
+        handlers["browser_dialog"](
+            {"action": "accept", "prompt_text": "typed secret", "index": -1},
+            task_id="dialog-task",
+        )
+    )
+    assert accepted["handled"] is True
+    assert last.accepted == ["typed secret"]
+
+    dismissed = json.loads(
+        handlers["browser_dialog"]({"action": "dismiss", "index": -1}, task_id="dialog-task")
+    )
+    assert dismissed["handled"] is True
+    assert first.dismissed is True
+
+
+def test_browser_dialog_accept_handles_once_and_removes_from_pending(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="dialog-accept")
+    page = FakeBrowserContext.created[0].pages[0]
+    dialog = FakeDialog(message="prompt token=secret", dialog_type="prompt", default_value="secret-default")
+    page.emit("dialog", dialog)
+
+    accepted = json.loads(
+        handlers["browser_dialog"](
+            {"action": "accept", "prompt_text": "typed secret", "index": -1},
+            task_id="dialog-accept",
+        )
+    )
+    second_accept = json.loads(
+        handlers["browser_dialog"]({"action": "accept", "index": -1}, task_id="dialog-accept")
+    )
+    listing = json.loads(handlers["browser_dialog"]({}, task_id="dialog-accept"))
+
+    assert accepted["handled"] is True
+    assert accepted["count"] == 0
+    assert dialog.accepted == ["typed secret"]
+    assert second_accept == {"handled": False, "count": 0, "dialogs": []}
+    assert dialog.accepted == ["typed secret"]
+    assert listing["count"] == 0
+    assert listing["latest"] is None
+    assert listing["dialogs"] == []
+
+
+def test_browser_dialog_dismiss_handles_once_and_removes_from_pending(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="dialog-dismiss")
+    page = FakeBrowserContext.created[0].pages[0]
+    dialog = FakeDialog(message="alert token=secret", dialog_type="alert")
+    page.emit("dialog", dialog)
+
+    dismissed = json.loads(
+        handlers["browser_dialog"]({"action": "dismiss", "index": -1}, task_id="dialog-dismiss")
+    )
+    second_dismiss = json.loads(
+        handlers["browser_dialog"]({"action": "dismiss", "index": -1}, task_id="dialog-dismiss")
+    )
+
+    assert dismissed["handled"] is True
+    assert dismissed["count"] == 0
+    assert dialog.dismissed is True
+    assert second_dismiss == {"handled": False, "count": 0, "dialogs": []}
+
+
+def test_browser_dialog_listing_redacts_pending_values_after_handling(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="dialog-list")
+    page = FakeBrowserContext.created[0].pages[0]
+    handled = FakeDialog(message="handled token=secret", default_value="secret-default")
+    pending = FakeDialog(message="pending token=secret", default_value="secret-default")
+    page.emit("dialog", handled)
+    page.emit("dialog", pending)
+
+    handlers["browser_dialog"]({"action": "accept", "index": 0}, task_id="dialog-list")
+    listing = json.loads(handlers["browser_dialog"]({}, task_id="dialog-list"))
+
+    assert listing["count"] == 1
+    assert listing["latest"]["message"] == "[REDACTED]"
+    assert listing["latest"]["default_value"] == "[REDACTED]"
+    assert "secret" not in json.dumps(listing)
+
+
+def test_browser_vision_screenshots_to_safe_temp_file_and_redacts(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="vision-task")
+
+    result = json.loads(handlers["browser_vision"]({"annotate": True}, task_id="vision-task"))
+
+    assert result["ok"] is True
+    assert result["mime_type"] == "image/png"
+    assert result["annotated"] is True
+    assert result["labels"]
+    screenshot_path = Path(result["screenshot_path"])
+    assert screenshot_path.exists()
+    assert screenshot_path.read_bytes().startswith(b"\x89PNG")
+    assert str(tmp_path / "profile") not in json.dumps(result)
+    assert "token=secret" not in json.dumps(result)
+
+
+def test_browser_vision_annotation_badges_follow_ref_numbers_when_earlier_ref_not_drawable(
+    plugin, monkeypatch, tmp_path
+):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="vision-badges")
+    page = FakeBrowserContext.created[0].pages[0]
+    page._cloak_ref_map = {"@e1": "#missing", "@e2": "#go"}
+
+    result = json.loads(handlers["browser_vision"]({"annotate": True}, task_id="vision-badges"))
+
+    assert result["annotated"] is True
+    assert result["labels"] == ["@e2"]
+    assert result["badge_to_ref"] == {"2": "@e2"}
+
+
+def test_browser_vision_screenshot_temp_files_cleaned_on_close_all(plugin, monkeypatch, tmp_path):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+    manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test"}, task_id="vision-cleanup"
+    )
+
+    result = manager.adapter.call("browser_vision", {}, task_id="vision-cleanup")
+    screenshot_path = Path(result["screenshot_path"])
+    temp_dir = screenshot_path.parent
+
+    assert screenshot_path.exists()
+    manager.close_all()
+
+    assert not temp_dir.exists()
+
+
+def test_session_manager_cleans_old_plugin_screenshot_dirs_on_init(plugin, monkeypatch, tmp_path):
+    temp_root = Path(tempfile.gettempdir())
+    plugin_dir = Path(tempfile.mkdtemp(prefix="cloakbrowser-vision-"))
+    unrelated_dir = Path(tempfile.mkdtemp(prefix="cloakbrowser-vision-"))
+    try:
+        (plugin_dir / ".cloakbrowser-hermes-plugin").write_text("marker")
+        (plugin_dir / "screenshot.png").write_bytes(b"old")
+        old_mtime = time.time() - 7200
+        os.utime(plugin_dir, (old_mtime, old_mtime))
+        (unrelated_dir / "other.txt").write_text("keep")
+
+        manager = plugin.session_manager.SessionManager(
+            plugin.config.load_config(
+                FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+            ).settings
+        )
+
+        assert not plugin_dir.exists()
+        assert unrelated_dir.exists()
+        manager.close_all()
+    finally:
+        if unrelated_dir.exists() and unrelated_dir.parent == temp_root:
+            for child in unrelated_dir.iterdir():
+                child.unlink()
+            unrelated_dir.rmdir()
+
+
+def test_browser_vision_blocks_private_page_reads(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "about:blank"}, task_id="private-vision")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.url = "http://127.0.0.1/private"
+
+    result = json.loads(handlers["browser_vision"]({}, task_id="private-vision"))
+
+    assert "blocked private or metadata browser URL" in result["error"]
+    assert page.screenshots == []
 
 
 def test_session_manager_shares_context_by_profile_and_closes_lifecycle(

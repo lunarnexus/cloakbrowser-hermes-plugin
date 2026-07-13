@@ -15,8 +15,34 @@ BROWSER_TOOL_NAMES = [
     "browser_press",
     "browser_get_images",
     "browser_console",
+    "browser_dialog",
+    "browser_vision",
 ]
+
+FALLBACK_SCHEMAS = {
+    "browser_dialog": {
+        "name": "browser_dialog",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["accept", "dismiss"]},
+                "index": {"type": "integer", "description": "Dialog index; -1 selects latest."},
+                "prompt_text": {"type": "string"},
+            },
+        },
+    },
+    "browser_vision": {
+        "name": "browser_vision",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "annotate": {"type": "boolean", "default": False},
+            },
+        },
+    },
+}
 
 
 def schema_for(name: str) -> dict:
-    return BROWSER_SCHEMAS.get(name, {"name": name, "parameters": {"type": "object"}})
+    return BROWSER_SCHEMAS.get(name, FALLBACK_SCHEMAS.get(name, {"name": name, "parameters": {"type": "object"}}))
