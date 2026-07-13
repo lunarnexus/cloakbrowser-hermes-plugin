@@ -248,6 +248,11 @@ class FakePage:
         ]
         self.listeners = {}
         self.screenshots = []
+        self.evaluate_scripts = []
+        self.dom_fallback_elements = [
+            {"ref": "@e1", "selector": "#dom-go", "text": "DOM Go", "role": "button"},
+            {"ref": "@e2", "selector": "#dom-input", "text": "", "role": "input"},
+        ]
 
     def on(self, event, handler):
         self.listeners.setdefault(event, []).append(handler)
@@ -289,14 +294,20 @@ class FakePage:
         return types.SimpleNamespace(status=200, ok=True)
 
     def evaluate(self, script, *args):
+        self.evaluate_scripts.append(script)
         if args and "getBoundingClientRect" in script:
             selectors = args[0]
             boxes = {
                 "#go": {"x": 12, "y": 18, "width": 44, "height": 24},
                 'internal:role=WebArea[name="Fake page"]': {"x": 0, "y": 0, "width": 100, "height": 100},
                 'internal:role=button[name="Go"]': {"x": 12, "y": 18, "width": 44, "height": 24},
+                "#dom-go": {"x": 8, "y": 10, "width": 50, "height": 20, "text": "DOM Go", "role": "button", "selector": "#dom-go"},
+                "#dom-input": {"x": 8, "y": 40, "width": 70, "height": 20, "text": "", "role": "input", "selector": "#dom-input"},
+                "#unique-button": {"x": 8, "y": 10, "width": 50, "height": 20, "text": "Unique", "role": "button", "selector": "#unique-button"},
             }
             return [boxes.get(selector) for selector in selectors]
+        if "uniqueSelectorFor" in script:
+            return self.dom_fallback_elements
         if "document.body.innerText" in script:
             return "Fake text"
         if "document.images" in script:
@@ -541,6 +552,86 @@ def test_browser_vision_annotation_badges_follow_ref_numbers_when_earlier_ref_no
     assert result["annotated"] is True
     assert result["labels"] == ["@e2"]
     assert result["badge_to_ref"] == {"2": "@e2"}
+
+
+def test_browser_vision_annotation_derives_dom_refs_when_snapshot_has_no_drawable_refs(
+    plugin, monkeypatch, tmp_path
+):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="vision-dom")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.accessibility = None
+    page._cloak_ref_map = {}
+
+    result = json.loads(handlers["browser_vision"]({"annotate": True}, task_id="vision-dom"))
+
+    assert result["annotated"] is True
+    assert result["labels"] == ["@e1", "@e2"]
+    assert result["badge_to_ref"] == {"1": "@e1", "2": "@e2"}
+    assert page._cloak_ref_map == {"@e1": "#dom-go", "@e2": "#dom-input"}
+    assert page._cloak_ref_metadata["@e1"] == {"text": "DOM Go", "role": "button"}
+    dom_scripts = [script for script in page.evaluate_scripts if "uniqueSelectorFor" in script]
+    assert dom_scripts
+    assert all("setAttribute" not in script for script in dom_scripts)
+    assert all("data-cloak-ref" not in script for script in dom_scripts)
+    assert all("document.querySelectorAll(selector).length === 1" in script for script in dom_scripts)
+    assert all("if (!selector) continue" in script for script in dom_scripts)
+
+
+def test_browser_vision_dom_fallback_stores_only_unique_generated_selectors(
+    plugin, monkeypatch, tmp_path
+):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="vision-unique")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.accessibility = None
+    page._cloak_ref_map = {}
+    page.dom_fallback_elements = [
+        {"ref": "@e1", "selector": "#unique-button", "text": "Unique", "role": "button"}
+    ]
+
+    result = json.loads(handlers["browser_vision"]({"annotate": True}, task_id="vision-unique"))
+
+    assert result["labels"] == ["@e1"]
+    assert page._cloak_ref_map == {"@e1": "#unique-button"}
+    assert "#duplicate" not in json.dumps(page._cloak_ref_map)
+
+
+def test_browser_click_and_type_use_generated_dom_fallback_refs(
+    plugin, monkeypatch, tmp_path
+):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="vision-dom-actions")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.accessibility = None
+    page._cloak_ref_map = {}
+
+    handlers["browser_vision"]({"annotate": True}, task_id="vision-dom-actions")
+    clicked = json.loads(handlers["browser_click"]({"ref": "@e1"}, task_id="vision-dom-actions"))
+    typed = json.loads(
+        handlers["browser_type"]({"ref": "@e2", "text": "abc"}, task_id="vision-dom-actions")
+    )
+
+    assert clicked["clicked"] is True
+    assert typed["typed"] is True
+    assert ("click", "#dom-go") in page.events
+    assert ("fill", "#dom-input", "abc") in page.events
+
+
+def test_browser_vision_dom_fallback_blocks_private_page_before_dom_read(
+    plugin, monkeypatch, tmp_path
+):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "about:blank"}, task_id="vision-dom-private")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.url = "http://127.0.0.1/private?token=secret"
+    page.accessibility = None
+
+    result = json.loads(handlers["browser_vision"]({"annotate": True}, task_id="vision-dom-private"))
+
+    assert "blocked private or metadata browser URL" in result["error"]
+    assert "secret" not in json.dumps(result)
+    assert page.screenshots == []
 
 
 def test_browser_vision_screenshot_temp_files_cleaned_on_close_all(plugin, monkeypatch, tmp_path):

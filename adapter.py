@@ -383,6 +383,18 @@ class CloakBrowserAdapter:
         if not ref_map:
             self._snapshot(page, {})
             ref_map = getattr(page, "_cloak_ref_map", {}) or {}
+        labels = self._labels_from_ref_map(page, ref_map)
+        if labels:
+            return labels
+        dom_refs = self._dom_fallback_ref_map(page)
+        if dom_refs:
+            setattr(page, "_cloak_ref_map", dom_refs)
+            return self._labels_from_ref_map(page, dom_refs)
+        return []
+
+    def _labels_from_ref_map(
+        self, page: Any, ref_map: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         refs = list(ref_map)[:99]
         selectors = [str(ref_map[ref]) for ref in refs]
         boxes = self._dom_bounding_boxes(page, selectors)
@@ -394,16 +406,23 @@ class CloakBrowserAdapter:
             height = float(box.get("height") or 0)
             if width <= 0 or height <= 0:
                 continue
-            labels.append(
-                {
-                    "ref": ref,
-                    "badge": self._annotation_badge_number(ref, len(labels) + 1),
-                    "x": max(0.0, float(box.get("x") or 0)),
-                    "y": max(0.0, float(box.get("y") or 0)),
-                    "width": width,
-                    "height": height,
-                }
-            )
+            label = {
+                "ref": ref,
+                "badge": self._annotation_badge_number(ref, len(labels) + 1),
+                "x": max(0.0, float(box.get("x") or 0)),
+                "y": max(0.0, float(box.get("y") or 0)),
+                "width": width,
+                "height": height,
+            }
+            for key in ("text", "role", "selector"):
+                if box.get(key):
+                    label[key] = box[key]
+            metadata = getattr(page, "_cloak_ref_metadata", {}) or {}
+            if isinstance(metadata, dict) and isinstance(metadata.get(ref), dict):
+                for key in ("text", "role"):
+                    if metadata[ref].get(key) and key not in label:
+                        label[key] = metadata[ref][key]
+            labels.append(label)
         return labels
 
     def _annotation_badge_number(self, ref: str, fallback: int) -> int:
@@ -411,6 +430,83 @@ class CloakBrowserAdapter:
         if match:
             return int(match.group(1))
         return fallback
+
+    def _dom_fallback_ref_map(self, page: Any) -> dict[str, str]:
+        script = r"""
+        () => {
+          const uniqueSelectorFor = (el) => {
+            const isUnique = (selector) => {
+              try {
+                return document.querySelectorAll(selector).length === 1;
+              } catch (_error) {
+                return false;
+              }
+            };
+            if (el.id) {
+              const selector = `#${CSS.escape(el.id)}`;
+              if (isUnique(selector)) return selector;
+            }
+            const parts = [];
+            let node = el;
+            while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.body) {
+              const tag = node.tagName.toLowerCase();
+              const parent = node.parentElement;
+              if (!parent) break;
+              const siblings = Array.from(parent.children).filter((child) => child.tagName === node.tagName);
+              const index = siblings.indexOf(node) + 1;
+              parts.unshift(`${tag}:nth-of-type(${index})`);
+              const selector = parts.join(' > ');
+              if (selector && isUnique(selector)) return selector;
+              node = parent;
+            }
+            const selector = parts.length ? parts.join(' > ') : el.tagName.toLowerCase();
+            return selector && isUnique(selector) ? selector : null;
+          };
+          const visible = (el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.right >= 0 &&
+              rect.top <= window.innerHeight && rect.left <= window.innerWidth &&
+              style.visibility !== 'hidden' && style.display !== 'none' && style.pointerEvents !== 'none';
+          };
+          const candidates = Array.from(document.querySelectorAll(
+            'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], summary, label'
+          ));
+          const refs = [];
+          for (const el of candidates) {
+            if (refs.length >= 99) break;
+            if (!visible(el)) continue;
+            const selector = uniqueSelectorFor(el);
+            if (!selector) continue;
+            const ref = `@e${refs.length + 1}`;
+            const text = (el.getAttribute('aria-label') || el.innerText || el.value || el.alt || '').trim().slice(0, 120);
+            refs.push({ref, selector, text, role: el.getAttribute('role') || el.tagName.toLowerCase()});
+          }
+          return refs;
+        }
+        """
+        evaluate = getattr(page, "evaluate", None)
+        if not callable(evaluate):
+            return {}
+        try:
+            elements = self.run(evaluate(script)) or []
+        except Exception:
+            return {}
+        ref_map: dict[str, str] = {}
+        metadata: dict[str, dict[str, Any]] = {}
+        for item in elements:
+            if not isinstance(item, dict):
+                continue
+            ref = str(item.get("ref") or "")
+            selector = str(item.get("selector") or "")
+            if not re.fullmatch(r"@e\d+", ref) or not selector:
+                continue
+            ref_map[ref] = selector
+            metadata[ref] = {
+                key: item[key] for key in ("text", "role") if item.get(key)
+            }
+        setattr(page, "_cloak_ref_metadata", metadata)
+        return ref_map
 
     def _dom_bounding_boxes(self, page: Any, selectors: list[str]) -> list[Any]:
         if not selectors:
@@ -421,7 +517,17 @@ class CloakBrowserAdapter:
             const node = document.querySelector(selector);
             if (!node) return null;
             const rect = node.getBoundingClientRect();
-            return {x: rect.left, y: rect.top, width: rect.width, height: rect.height};
+            const style = window.getComputedStyle(node);
+            if (style.visibility === 'hidden' || style.display === 'none') return null;
+            return {
+              x: rect.left,
+              y: rect.top,
+              width: rect.width,
+              height: rect.height,
+              selector,
+              role: node.getAttribute('role') || node.tagName.toLowerCase(),
+              text: (node.getAttribute('aria-label') || node.innerText || node.value || node.alt || '').trim().slice(0, 120),
+            };
           } catch (_error) {
             return null;
           }
