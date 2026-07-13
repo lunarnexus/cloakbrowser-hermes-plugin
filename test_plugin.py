@@ -997,6 +997,22 @@ def test_console_output_is_bounded_and_redacts_nested_secrets(plugin, monkeypatc
     assert "Bearer [REDACTED]" in json.dumps(output)
 
 
+def test_console_messages_method_is_called(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_snapshot"]({}, task_id="console-method")
+    page = FakeBrowserContext.created[0].pages[0]
+    method_messages = [{"type": "log", "text": "method-token=secret"}]
+
+    def console_messages():
+        return method_messages
+
+    page.console_messages = console_messages
+
+    output = json.loads(handlers["browser_console"]({}, task_id="console-method"))
+
+    assert output["messages"] == [{"type": "log", "text": "method-token=[REDACTED]"}]
+
+
 @pytest.mark.parametrize(
     "url",
     [

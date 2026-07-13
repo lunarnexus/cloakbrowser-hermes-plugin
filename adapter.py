@@ -226,13 +226,24 @@ class CloakBrowserAdapter:
             self._assert_safe_page_url(getattr(page, "url", None))
         messages = getattr(page, "_cloak_console_messages", None)
         if messages is None or (
-            not list(messages) and hasattr(page, "console_messages")
+            not self._console_messages_list(messages) and hasattr(page, "console_messages")
         ):
-            messages = getattr(page, "console_messages", [])
-        result["messages"] = list(messages)[-200:]
+            messages = self._page_console_messages(page)
+        result["messages"] = self._console_messages_list(messages)[-200:]
         if args.get("clear") and hasattr(messages, "clear"):
             messages.clear()
         return result
+
+    def _page_console_messages(self, page: Any) -> Any:
+        messages = getattr(page, "console_messages", [])
+        if callable(messages):
+            return self.run(messages())
+        return messages
+
+    def _console_messages_list(self, messages: Any) -> list[Any]:
+        if messages is None:
+            return []
+        return list(messages)
 
     def _get_images(self, page: Any, _args: dict[str, Any]) -> dict[str, Any]:
         self._assert_safe_page_url(getattr(page, "url", None))
