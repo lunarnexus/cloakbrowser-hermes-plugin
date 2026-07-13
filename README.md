@@ -1,6 +1,7 @@
 # cloakbrowser-hermes-plugin
 
-Direct-SDK Hermes plugin foundation for routing the built-in `browser_*` tool family through the ColorSource CloakBrowser Python SDK.
+Cloak Browser support for Hermes Agent, as a plugin.  
+This plugin overrides the built-in `browser_*` tool family and routes through the CloakBrowser Python SDK.
 
 Current foundation behavior:
 - Registers `/cloak status` and `/cloak help`.
@@ -8,13 +9,13 @@ Current foundation behavior:
 - Launches and reuses a persistent CloakBrowser context for browser tool calls.
 - Redacts local profile paths from status output.
 - Uses a dedicated persistent profile directory by default under the active Hermes profile.
-- Shares one persistent CloakBrowser profile/login per canonical `user_data_dir` within the current Hermes process, so same-profile root sessions and delegated work can reuse auth state. Task/session isolation is per-page state, refs, and console buffers, not separate login profiles. Cross-process profile locking is left to CloakBrowser/Chromium.
+- Shares one persistent CloakBrowser profile/login per canonical `user_data_dir` within the current Hermes process, so same-profile root sessions and delegated work can reuse auth state. Task/session isolation is per-page state, refs, and console buffers, not separate login profiles. Cross-process profile locking is left to CloakBrowser/Chromium.  This means only one concurrent CloakBrowser instance per profile.  I may fix this in the future, but it causes security problems. 
 
 ## Requirements
 
-1. Hermes Agent with plugin support.
-2. Python package `cloakbrowser` installed in the same environment that runs Hermes.
-3. A local desktop session for future headed browser slices.
+1. Hermes Agent, obviously.
+2. Python package `cloakbrowser` installed in the Hermes venv.
+3. A local desktop session for future browser sessions (headless=false).
 
 ## Install
 
