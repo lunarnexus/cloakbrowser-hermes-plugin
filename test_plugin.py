@@ -104,6 +104,8 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
                         "locale": None,
                         "timezone": "UTC",
                         "args": ["--disable-gpu"],
+                        "auto_acknowledge_banner": False,
+                        "auto_update": False,
                     },
                 }
             }
@@ -123,6 +125,8 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
     assert parsed.settings.locale is None
     assert parsed.settings.timezone == "UTC"
     assert parsed.settings.args == ["--disable-gpu"]
+    assert parsed.settings.auto_acknowledge_banner is False
+    assert parsed.settings.auto_update is False
     assert "allow_tool_override" not in parsed.settings.to_sdk_options()
     assert "geoip requires proxy" in "; ".join(parsed.warnings)
 
@@ -184,6 +188,178 @@ def test_registered_handlers_use_fake_sdk_without_real_browser(
 
     assert result["url"] == "about:blank"
     assert "task-secret" not in json.dumps(result)
+
+
+def _install_fake_cloakbrowser(monkeypatch, cache_dir, create):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    setattr(fake_sdk, "create", create)
+    fake_download = types.ModuleType("cloakbrowser.download")
+    setattr(fake_download, "get_cache_dir", lambda: str(cache_dir))
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    monkeypatch.setitem(sys.modules, "cloakbrowser.download", fake_download)
+    return fake_sdk
+
+
+def test_sdk_banner_marker_written_when_enabled(plugin, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cache"
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        cache_dir,
+        lambda **options: FakeBrowserContext(**options),
+    )
+    ctx = FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    plugin.register(ctx)
+
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="banner-on")
+    )
+
+    marker = cache_dir / ".welcome_shown"
+    assert result["url"] == "about:blank"
+    assert marker.exists()
+    assert int(marker.read_text()) <= int(time.time())
+
+
+def test_sdk_banner_marker_not_written_when_disabled(plugin, monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cache"
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        cache_dir,
+        lambda **options: FakeBrowserContext(**options),
+    )
+    ctx = FakeCtx(
+        {
+            "plugins": {
+                "entries": {
+                    "cloakbrowser-hermes-plugin": {
+                        "config": {
+                            "user_data_dir": str(tmp_path / "profile"),
+                            "auto_acknowledge_banner": False,
+                        }
+                    }
+                }
+            }
+        }
+    )
+    plugin.register(ctx)
+
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="banner-off")
+    )
+
+    assert result["url"] == "about:blank"
+    assert not (cache_dir / ".welcome_shown").exists()
+
+
+def test_auto_update_false_sets_env_only_when_absent(plugin, monkeypatch, tmp_path):
+    monkeypatch.delenv("CLOAKBROWSER_AUTO_UPDATE", raising=False)
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        tmp_path / "cache",
+        lambda **options: FakeBrowserContext(**options),
+    )
+    ctx = FakeCtx(
+        {
+            "plugins": {
+                "entries": {
+                    "cloakbrowser-hermes-plugin": {
+                        "config": {
+                            "user_data_dir": str(tmp_path / "profile"),
+                            "auto_update": False,
+                        }
+                    }
+                }
+            }
+        }
+    )
+    plugin.register(ctx)
+
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="auto-update-off")
+    )
+
+    assert result["url"] == "about:blank"
+    assert os.environ["CLOAKBROWSER_AUTO_UPDATE"] == "false"
+
+
+def test_auto_update_env_var_wins(plugin, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLOAKBROWSER_AUTO_UPDATE", "true")
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        tmp_path / "cache",
+        lambda **options: FakeBrowserContext(**options),
+    )
+    ctx = FakeCtx(
+        {
+            "plugins": {
+                "entries": {
+                    "cloakbrowser-hermes-plugin": {
+                        "config": {
+                            "user_data_dir": str(tmp_path / "profile"),
+                            "auto_update": False,
+                        }
+                    }
+                }
+            }
+        }
+    )
+    plugin.register(ctx)
+
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="auto-update-env")
+    )
+
+    assert result["url"] == "about:blank"
+    assert os.environ["CLOAKBROWSER_AUTO_UPDATE"] == "true"
+
+
+def test_auto_update_true_leaves_env_absent(plugin, monkeypatch, tmp_path):
+    monkeypatch.delenv("CLOAKBROWSER_AUTO_UPDATE", raising=False)
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        tmp_path / "cache",
+        lambda **options: FakeBrowserContext(**options),
+    )
+    ctx = FakeCtx(
+        {
+            "plugins": {
+                "entries": {
+                    "cloakbrowser-hermes-plugin": {
+                        "config": {
+                            "user_data_dir": str(tmp_path / "profile"),
+                            "auto_update": True,
+                        }
+                    }
+                }
+            }
+        }
+    )
+    plugin.register(ctx)
+
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="auto-update-on")
+    )
+
+    assert result["url"] == "about:blank"
+    assert "CLOAKBROWSER_AUTO_UPDATE" not in os.environ
+
+
+def test_sdk_startup_stderr_not_swallowed_on_failure(plugin, monkeypatch, tmp_path, capsys):
+    def create(**_options):
+        print("useful SDK failure detail", file=sys.stderr)
+        raise RuntimeError("launch failed")
+
+    _install_fake_cloakbrowser(monkeypatch, tmp_path / "cache", create)
+    ctx = FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    plugin.register(ctx)
+
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="fail")
+    )
+
+    captured = capsys.readouterr()
+    assert result["error"] == "launch failed"
+    assert "useful SDK failure detail" in captured.err
 
 
 class FakeElement:

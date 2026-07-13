@@ -25,6 +25,8 @@ class CloakConfig:
     timezone: str | None = None
     color_scheme: str | None = None
     user_agent: str | None = None
+    auto_acknowledge_banner: bool = True
+    auto_update: bool | None = None
 
     def to_sdk_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -112,6 +114,21 @@ def _parse_bool(raw: Any, default: bool, name: str, errors: list[str]) -> bool:
             return False
     errors.append(f"{name} must be a boolean")
     return default
+
+
+def _parse_optional_bool(raw: Any, name: str, errors: list[str]) -> bool | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        lowered = raw.strip().lower()
+        if lowered in _TRUE_STRINGS:
+            return True
+        if lowered in _FALSE_STRINGS:
+            return False
+    errors.append(f"{name} must be a boolean or null")
+    return None
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:
@@ -213,6 +230,13 @@ def load_config(ctx: Any) -> ConfigResult:
         stealth_args=_parse_bool(raw.get("stealth_args"), True, "stealth_args", errors),
         geoip=geoip,
         args=list(args),
+        auto_acknowledge_banner=_parse_bool(
+            raw.get("auto_acknowledge_banner"),
+            True,
+            "auto_acknowledge_banner",
+            errors,
+        ),
+        auto_update=_parse_optional_bool(raw.get("auto_update"), "auto_update", errors),
         **optional_values,
     )
     return ConfigResult(

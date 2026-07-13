@@ -5,8 +5,10 @@ import importlib
 import inspect
 import ipaddress
 import json
+import os
 import re
 import socket
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -57,6 +59,8 @@ class CloakBrowserAdapter:
         return value
 
     def create_context(self) -> Any:
+        self._configure_sdk_environment()
+        self._acknowledge_sdk_banner()
         sdk = importlib.import_module("cloakbrowser")
         options = self.settings.to_sdk_options()
         for name in ("create", "launch_persistent_context"):
@@ -85,6 +89,24 @@ class CloakBrowserAdapter:
                     return self.run(member())
             return instance
         raise RuntimeError("cloakbrowser SDK has no supported browser/context factory")
+
+    def _configure_sdk_environment(self) -> None:
+        if (
+            self.settings.auto_update is False
+            and "CLOAKBROWSER_AUTO_UPDATE" not in os.environ
+        ):
+            os.environ["CLOAKBROWSER_AUTO_UPDATE"] = "false"
+
+    def _acknowledge_sdk_banner(self) -> None:
+        if not self.settings.auto_acknowledge_banner:
+            return
+        try:
+            download = importlib.import_module("cloakbrowser.download")
+            cache_dir = Path(download.get_cache_dir()).expanduser()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / ".welcome_shown").write_text(str(int(time.time())))
+        except Exception:
+            return
 
     def call(
         self, tool_name: str, args: dict[str, Any], **kwargs: Any

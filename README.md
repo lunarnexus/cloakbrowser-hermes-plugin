@@ -75,7 +75,24 @@ plugins:
         color_scheme: null
         user_agent: null
         args: []
+        # Write CloakBrowser SDK banner marker before launch. Default: true.
+        auto_acknowledge_banner: true
+        # Optional tri-state. Omit/null or true leaves SDK/env behavior unchanged.
+        # false sets CLOAKBROWSER_AUTO_UPDATE=false only when the env var is absent.
+        auto_update: null
 ```
+
+Install the CloakBrowser SDK into the Hermes virtualenv used by the target profile:
+
+```bash
+~/.local/share/uv/tools/hermes-agent/bin/python -m pip install cloakbrowser
+```
+
+If your Hermes install uses a different venv, run `python -m pip install cloakbrowser` with that Hermes venv's Python.
+
+`auto_acknowledge_banner` writes a fresh integer Unix timestamp to CloakBrowser's `.welcome_shown` marker in `cloakbrowser.download.get_cache_dir()` before SDK launch. Marker write failures are ignored so launch is not blocked.
+
+`auto_update` respects environment precedence. If `CLOAKBROWSER_AUTO_UPDATE` is already set, the plugin never overwrites it. If `auto_update` is omitted, `null`, or `true`, the plugin leaves SDK/env behavior unchanged. If `auto_update: false` and the env var is absent, the plugin sets `CLOAKBROWSER_AUTO_UPDATE=false` before launch.
 
 `user_data_dir` must be a dedicated CloakBrowser profile directory. The plugin rejects dangerous locations such as `/`, the home directory, the repository root, common browser profile directories, symlinked paths, and other Hermes profile directories outside the current profile-owned CloakBrowser path.
 
