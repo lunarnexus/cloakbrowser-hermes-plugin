@@ -13,7 +13,7 @@ Rewrite `cloakbrowser-hermes-plugin` from an MCP-backed browser-tool override pl
 - Do not use MCP runtime, `cloakbrowser-mcp`, MCP discovery gates, MCP envelope adapters, or MCP-owned browser state in the target rewrite.
 - Do not copy-forward the paused native-core experiment as the implementation.
 - Do not claim direct-SDK migration, packaging, feature parity, or verification is complete until current-code tests and smoke checks produce real output.
-- Persistent profile/auth state must not be shared across unrelated top-level Hermes sessions. Required boundary is root Hermes session plus delegated children.
+- Same-profile persistent profile/login state is intentionally shared by canonical `user_data_dir` inside one Hermes process. Isolation boundary is a distinct `user_data_dir` (normally one per Hermes profile), while root/task/session work under the same profile gets distinct pages, refs, console buffers, and diagnostics.
 - Automated smoke should use temporary profiles and `about:blank` / `data:` URLs before any real website.
 
 ## Current completed research
@@ -22,10 +22,10 @@ Rewrite `cloakbrowser-hermes-plugin` from an MCP-backed browser-tool override pl
 - Existing plugin inventory from transition evidence: nine built-in browser tools are overridden via `ctx.register_tool(..., override=True)` and `/cloak` is registered with `ctx.register_command()`.
 - Existing plugin state is MCP-backed in docs/source history: handlers dispatch into MCP via `ctx.dispatch_tool()`; MCP owns launch/close, page registry, snapshot refs, console/download buffers, and cleanup.
 - Required target architecture is documented in `PLAN.md`:
-  - physical shared state keyed by `canonical(user_data_dir) + root_session_id`;
+  - physical shared state keyed by canonical `user_data_dir` inside one process;
   - task-local logical state keyed by `task_id -> page, ref map, console buffer, diagnostics`;
-  - start with one active sensitive CloakBrowser operation per root session.
-- Historical native-core research found lifecycle hazards relevant to plugin design: registry-lock deadlock around browser I/O, duplicate physical page close, relaunch during teardown, acquire/final-close races, and unsafe profile-only sharing. These are evidence for design, not plugin readiness.
+  - start with one active sensitive CloakBrowser operation per shared profile where needed.
+- Historical native-core research found lifecycle hazards relevant to plugin design: registry-lock deadlock around browser I/O, duplicate physical page close, relaunch during teardown, acquire/final-close races, and unintended cross-profile sharing. These are evidence for design, not plugin readiness.
 - Official Hermes plugin docs were checked as the current authoritative plugin surface reference.
 
 ## Key sources
@@ -56,7 +56,7 @@ Rewrite `cloakbrowser-hermes-plugin` from an MCP-backed browser-tool override pl
 ## Blockers / open decisions
 
 - Exact dependency packaging model for the `cloakbrowser` SDK remains undecided.
-- Exact Hermes plugin API for root-session and task identity must be verified before implementing the trust boundary.
+- Exact Hermes plugin API for task/session identity must be verified before finalizing the logical state boundary.
 - Decide whether downloads/evaluate need user-visible plugin support or remain internal/unsupported.
 - Decide and document whether `browser_vision` stays native or later gets screenshot-based CloakBrowser support.
 - Decide and document whether `browser_cdp` stays native/unsupported or gets a tested CloakBrowser CDP path.
@@ -68,6 +68,6 @@ Rewrite `cloakbrowser-hermes-plugin` from an MCP-backed browser-tool override pl
 1. Preserve this `STATUS.md` as context before further implementation.
 2. Let the active implementation worker finish or coordinate before editing the same files.
 3. Review current diffs in `test_plugin.py`, `config.py`, and `PLAN.md` before making additional code changes.
-4. Complete/confirm Phase 0 facts if not already done: current Hermes plugin APIs, browser schemas, installed `cloakbrowser` SDK APIs, dependency approach, and root/task identity availability.
+4. Complete/confirm Phase 0 facts if not already done: current Hermes plugin APIs, browser schemas, installed `cloakbrowser` SDK APIs, dependency approach, and task/session identity availability.
 5. Implement only the planned config/dependency foundation slice first; do not broaden into tool parity or lifecycle races until foundation tests pass.
-6. Before claiming completion, produce real passing output for relevant unit tests, lifecycle/race tests, root/delegate isolation, cross-root isolation, live direct-SDK temporary-profile smoke, and static checks as listed in `PLAN.md`.
+6. Before claiming completion, produce real passing output for relevant unit tests, lifecycle/race tests, same-profile sharing, cross-profile distinct-directory isolation, live direct-SDK temporary-profile smoke, and static checks as listed in `PLAN.md`.

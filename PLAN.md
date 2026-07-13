@@ -24,8 +24,8 @@ Rewrite `cloakbrowser-hermes-plugin` from an MCP-backed browser-tool override pl
   - `browser_get_images`
   - `browser_console`
 - No `cloakbrowser-mcp` server, MCP discovery gate, MCP envelope adapter, or MCP-owned browser state is required.
-- The plugin owns launch/close lifecycle, page registry, snapshot refs, console/error buffers, timeout/fatal cleanup, and task/root-session routing.
-- Root Hermes session plus delegated children may share one physical persistent context; unrelated top-level sessions must not share context/auth state even with the same `user_data_dir`.
+- The plugin owns launch/close lifecycle, page registry, snapshot refs, console/error buffers, timeout/fatal cleanup, and task/session routing.
+- Root/session work inside the same Hermes profile should share one physical persistent context/login where possible; unrelated profiles should use different `user_data_dir` values.
 - Task-local state remains isolated: page, refs, console buffer, and diagnostics must not be shared between task IDs.
 - `browser_vision` and `browser_cdp` remain explicitly out of scope unless later planned and contract-tested.
 - Verification uses temporary profiles and `about:blank`/`data:` URLs before any real website smoke.
@@ -110,8 +110,10 @@ Rules:
 Key one physical browser/context/event-loop bundle by:
 
 ```text
-canonical(user_data_dir) + root_session_id
+canonical(user_data_dir)
 ```
+
+The intended registry key is the canonical persistent profile directory. Within one Hermes process, all managers using that key share one CloakBrowser profile/login. Root/task/session isolation lives in logical page-scoped state below this physical context; it is not separate auth state.
 
 Responsibilities:
 
@@ -122,7 +124,7 @@ Responsibilities:
 
 ### Task-local logical state
 
-Key task-local state by task ID under the root session:
+Key task/session-local state by logical task or session ID under the shared profile:
 
 ```text
 task_id -> page, ref map, console buffer, error/diagnostic state
@@ -138,7 +140,7 @@ Responsibilities:
 
 ### Serialization
 
-Start with one active sensitive CloakBrowser operation per root session. Separate pages do not fully remove shared-profile risks from cookies, downloads, dialogs, and anti-bot flows. Relax only after deterministic concurrency coverage and review.
+Start with one active sensitive CloakBrowser operation per shared profile where needed. Separate pages do not fully remove shared-profile risks from cookies, downloads, dialogs, and anti-bot flows. Relax only after deterministic concurrency coverage and review.
 
 ## Files to Change
 
@@ -157,7 +159,7 @@ Start with one active sensitive CloakBrowser operation per root session. Separat
 2. Inspect current plugin source and tests; record exact behavior and schemas for all nine overrides.
 3. Inspect installed `cloakbrowser` SDK version and direct launch/page APIs.
 4. Confirm dependency strategy: plugin dependency metadata, documented manual install, or Hermes-supported plugin environment.
-5. Verify how plugin handlers can access both root session identity and task identity. Stop if this identity is unavailable.
+5. Verify how plugin handlers receive task/session identity. Stop if no logical identity is available.
 
 ### Phase 1: Config and dependency foundation
 
@@ -171,7 +173,7 @@ Start with one active sensitive CloakBrowser operation per root session. Separat
 ### Phase 2: Direct SDK runtime
 
 1. Remove MCP server discovery and `ctx.dispatch_tool()` calls.
-2. Implement physical context manager keyed by canonical `user_data_dir` plus root session ID.
+2. Implement physical context manager keyed by canonical `user_data_dir`.
 3. Implement task-local page/ref/console/diagnostic state.
 4. Implement launch, close, timeout, fatal cleanup, final teardown, and teardown reservation.
 5. Keep browser I/O outside non-reentrant registry locks.
@@ -208,7 +210,8 @@ Start with one active sensitive CloakBrowser operation per root session. Separat
   - invalid `human_preset` fails clearly.
 - Tool contract tests for all nine overrides using local fixtures.
 - Task isolation tests for refs, pages, console buffers, and diagnostics.
-- Root-session sharing and cross-root isolation tests.
+- Same-profile sharing test with distinct task pages.
+- Cross-profile isolation through distinct `user_data_dir` values.
 - Lifecycle/race tests for close, timeout, fatal cleanup, teardown reservation, and final close.
 - Live smoke test using temporary `user_data_dir` plus `about:blank`/`data:` only.
 
@@ -218,15 +221,15 @@ Do not call the rewrite complete until current code produces real passing output
 
 1. Unit tests for config parsing and all retained override schemas.
 2. Deterministic lifecycle/race tests.
-3. Root-session/delegate sharing test with distinct task pages.
-4. Cross-root same-profile isolation test.
+3. Same-profile/delegate sharing test with distinct task pages.
+4. Cross-profile isolation through distinct `user_data_dir` values.
 5. Live direct-SDK smoke with a temporary profile and cleanup assertion.
 6. Repository formatting/lint/type/compile checks as applicable.
 7. Read-only code review and security review before commit/PR.
 
 ## Risks
 
-- Security/privacy: profile directories contain cookies, local storage, and authenticated state. Never share across unrelated root sessions; avoid logging secrets and profile contents.
+- Security/privacy: profile directories contain cookies, local storage, and authenticated state. Same Hermes profile sessions sharing a `user_data_dir` intentionally share login state; use separate profile directories for isolation boundaries. Avoid logging secrets and profile contents.
 - Compatibility: Hermes plugin APIs, config conventions, and browser tool schemas may have changed; Phase 0 must refresh live APIs before implementation.
 - Concurrency: persistent Chromium profile locks can still conflict across independent OS processes. V1 only handles same-process lifecycle coordination.
 - Fingerprint coherence: proxy, GeoIP, locale, timezone, user agent, color scheme, and extra args can create inconsistent identity signals if misconfigured.
@@ -237,7 +240,7 @@ Do not call the rewrite complete until current code produces real passing output
 ## Open Decisions
 
 - Exact dependency packaging model for `cloakbrowser` SDK.
-- Exact Hermes plugin API for root-session and task identity.
+- Exact Hermes plugin API for task/session identity.
 - Whether downloads/evaluate need user-visible plugin support or remain internal/unsupported.
 - Whether `browser_vision` should stay native or later gain screenshot-based CloakBrowser support.
 - Whether `browser_cdp` should stay native/unsupported or get a tested CloakBrowser CDP path.
@@ -245,4 +248,4 @@ Do not call the rewrite complete until current code produces real passing output
 
 ## First Next Action
 
-Run Phase 0 only: live inventory of the current plugin, current Hermes plugin APIs, current browser schemas, and current `cloakbrowser` SDK. Do not port lifecycle code or start broad refactors until root-session/task identity and SDK launch behavior are confirmed.
+Run Phase 0 only: live inventory of the current plugin, current Hermes plugin APIs, current browser schemas, and current `cloakbrowser` SDK. Do not port lifecycle code or start broad refactors until task/session identity and SDK launch behavior are confirmed.

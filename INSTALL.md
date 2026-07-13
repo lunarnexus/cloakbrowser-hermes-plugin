@@ -2,7 +2,7 @@
 
 Install the CloakBrowser direct-SDK Hermes plugin foundation.
 
-This slice installs the Hermes plugin only. It does not configure any external browser server. Browser launch/navigation implementation is intentionally fail-closed until the next implementation slice.
+This installs the Hermes plugin only. It does not configure any external browser server. Browser tool calls launch and reuse a plugin-owned persistent CloakBrowser SDK context when the SDK is importable and config is valid.
 
 ## 1) Install CloakBrowser SDK dependency
 
@@ -84,6 +84,7 @@ Safety rules for `user_data_dir`:
 - Use a dedicated CloakBrowser profile directory.
 - Do not use `/`, the home directory, the repository root, common browser profile directories, symlinked paths, or another Hermes profile directory.
 - The default active-profile path is safest: `~/.hermes/profiles/<profile>/browser-profiles/cloakbrowser`.
+- Within one Hermes process, the canonical `user_data_dir` is the persistent context registry key. Same-profile sessions using this path intentionally share one CloakBrowser profile/login; task/session isolation is separate pages, refs, and console buffers.
 
 ## 4) First-run check
 
@@ -97,7 +98,7 @@ Expected for this foundation slice:
 - `/cloak status` returns readiness and high-level state only.
 - Status does not expose profile paths, session IDs, cookies, or URLs.
 - If `cloakbrowser` is not importable, browser tool overrides are not registered.
-- If `cloakbrowser` is importable and config is valid, browser tool overrides register but fail closed with the current safe placeholder error.
+- If `cloakbrowser` is importable and config is valid, browser tool overrides register and route calls through the direct SDK context.
 
 ## Disable
 

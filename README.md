@@ -5,9 +5,10 @@ Direct-SDK Hermes plugin foundation for routing the built-in `browser_*` tool fa
 Current foundation behavior:
 - Registers `/cloak status` and `/cloak help`.
 - Overrides `browser_*` tools only when config is valid and the `cloakbrowser` Python package is importable.
-- Does not launch a browser yet; tool handlers fail closed with a safe placeholder error in this slice.
+- Launches and reuses a persistent CloakBrowser context for browser tool calls.
 - Redacts local profile paths from status output.
 - Uses a dedicated persistent profile directory by default under the active Hermes profile.
+- Shares one persistent CloakBrowser profile/login per canonical `user_data_dir` within the current Hermes process, so same-profile root sessions and delegated work can reuse auth state. Task/session isolation is per-page state, refs, and console buffers, not separate login profiles. Cross-process profile locking is left to CloakBrowser/Chromium.
 
 ## Requirements
 

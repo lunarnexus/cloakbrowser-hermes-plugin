@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -272,12 +274,14 @@ class FakePage:
 
 
 class FakeBrowserContext:
+    created = []
     closed = []
 
     def __init__(self, **options):
         self.options = options
         self.pages = [FakePage()]
         self.closed_flag = False
+        self.created.append(self)
 
     def new_page(self):
         page = FakePage()
@@ -290,6 +294,8 @@ class FakeBrowserContext:
 
 
 def _registered_browser_tools(plugin, monkeypatch, tmp_path):
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
     fake_sdk = types.ModuleType("cloakbrowser")
     fake_sdk.create = lambda **options: FakeBrowserContext(**options)
     monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
@@ -356,12 +362,14 @@ def test_browser_handlers_perform_direct_sdk_operations(plugin, monkeypatch, tmp
     ]
 
 
-def test_session_manager_reuses_by_task_and_closes_lifecycle(
+def test_session_manager_shares_context_by_profile_and_closes_lifecycle(
     plugin, monkeypatch, tmp_path
 ):
     fake_sdk = types.ModuleType("cloakbrowser")
     fake_sdk.create = lambda **options: FakeBrowserContext(**options)
     monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
     manager = plugin.session_manager.SessionManager(
         plugin.config.load_config(
             FakeCtx({"user_data_dir": str(tmp_path / "profile")})
@@ -375,7 +383,364 @@ def test_session_manager_reuses_by_task_and_closes_lifecycle(
 
     assert first is second
     assert other is not first
-    assert len(FakeBrowserContext.closed) >= 2
+    assert len(FakeBrowserContext.created) == 1
+    assert len(FakeBrowserContext.created[0].pages) == 2
+    assert FakeBrowserContext.closed == FakeBrowserContext.created
+
+    reacquired = manager.page_for(task_id="after-close")
+    assert reacquired is not first
+    assert len(FakeBrowserContext.created) == 2
+    manager.close_all()
+
+
+def test_session_manager_races_single_context_for_same_profile(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+
+    def create(**options):
+        time.sleep(0.05)
+        return FakeBrowserContext(**options)
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+    barrier = threading.Barrier(2)
+    pages = []
+    errors = []
+
+    def get_page(task_id):
+        try:
+            barrier.wait(timeout=2)
+            pages.append(manager.page_for(task_id=task_id))
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=get_page, args=("task-a",)),
+        threading.Thread(target=get_page, args=("task-b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+    manager.close_all()
+
+    assert errors == []
+    assert len(pages) == 2
+    assert pages[0] is not pages[1]
+    assert len(FakeBrowserContext.created) == 1
+    assert len(FakeBrowserContext.created[0].pages) == 2
+    assert FakeBrowserContext.closed == FakeBrowserContext.created
+
+
+def test_session_manager_slow_create_does_not_block_unrelated_profile(
+    plugin, monkeypatch, tmp_path
+):
+    slow_profile = str((tmp_path / "slow-profile").resolve())
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+
+    class ProfileAwareContext(FakeBrowserContext):
+        pass
+
+    def create(**options):
+        if options["user_data_dir"] == slow_profile:
+            slow_started.set()
+            assert release_slow.wait(timeout=2)
+        return ProfileAwareContext(**options)
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    ProfileAwareContext.created.clear()
+    ProfileAwareContext.closed.clear()
+    slow_manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(FakeCtx({"user_data_dir": slow_profile})).settings
+    )
+    fast_manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "fast-profile")})
+        ).settings
+    )
+    slow_pages = []
+    slow_thread = threading.Thread(
+        target=lambda: slow_pages.append(slow_manager.page_for(task_id="slow"))
+    )
+
+    slow_thread.start()
+    assert slow_started.wait(timeout=2)
+    fast_page = fast_manager.page_for(task_id="fast")
+
+    assert fast_page is not None
+    assert len(ProfileAwareContext.created) == 1
+    assert ProfileAwareContext.created[0].options["user_data_dir"] != slow_profile
+
+    release_slow.set()
+    slow_thread.join(timeout=2)
+    fast_manager.close_all()
+    slow_manager.close_all()
+
+    assert not slow_thread.is_alive()
+    assert len(slow_pages) == 1
+    assert len(ProfileAwareContext.created) == 2
+    assert ProfileAwareContext.closed == ProfileAwareContext.created
+
+
+def test_session_manager_same_session_concurrent_acquire_single_create(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    create_calls = 0
+
+    def create(**options):
+        nonlocal create_calls
+        create_calls += 1
+        time.sleep(0.05)
+        return FakeBrowserContext(**options)
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+    barrier = threading.Barrier(2)
+    pages = []
+    errors = []
+
+    def get_page():
+        try:
+            barrier.wait(timeout=2)
+            pages.append(manager.page_for(session_id="same-session"))
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=get_page), threading.Thread(target=get_page)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+    manager.close_all()
+
+    assert errors == []
+    assert len(pages) == 2
+    assert pages[0] is pages[1]
+    assert create_calls == 1
+    assert len(FakeBrowserContext.created) == 1
+    assert len(FakeBrowserContext.created[0].pages) == 1
+
+
+def test_session_manager_close_all_waits_for_in_flight_page_creation(
+    plugin, monkeypatch, tmp_path
+):
+    new_page_started = threading.Event()
+    release_new_page = threading.Event()
+    close_started = threading.Event()
+    close_finished = threading.Event()
+
+    class BlockingNewPageContext(FakeBrowserContext):
+        def __init__(self, **options):
+            super().__init__(**options)
+            self.pages = []
+            self.closed_before_returned_page = False
+
+        def new_page(self):
+            new_page_started.set()
+            assert release_new_page.wait(timeout=2)
+            page = super().new_page()
+            self.closed_before_returned_page = self.closed_flag
+            return page
+
+        def close(self):
+            close_started.set()
+            super().close()
+            close_finished.set()
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: BlockingNewPageContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    BlockingNewPageContext.created.clear()
+    BlockingNewPageContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+    pages = []
+    errors = []
+
+    def get_page():
+        try:
+            pages.append(manager.page_for(task_id="blocked-new-page"))
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    page_thread = threading.Thread(target=get_page)
+    page_thread.start()
+    assert new_page_started.wait(timeout=2)
+
+    close_thread = threading.Thread(target=manager.close_all)
+    close_thread.start()
+    time.sleep(0.05)
+
+    assert close_started.is_set() is False
+    assert close_finished.is_set() is False
+
+    release_new_page.set()
+    page_thread.join(timeout=2)
+    close_thread.join(timeout=2)
+
+    assert errors == []
+    assert len(pages) == 1
+    assert not page_thread.is_alive()
+    assert not close_thread.is_alive()
+    assert len(BlockingNewPageContext.created) == 1
+    assert BlockingNewPageContext.closed == BlockingNewPageContext.created
+    assert BlockingNewPageContext.created[0].closed_before_returned_page is False
+
+
+def test_session_manager_same_session_concurrent_new_page_single_page(
+    plugin, monkeypatch, tmp_path
+):
+    class SlowNewPageContext(FakeBrowserContext):
+        def __init__(self, **options):
+            super().__init__(**options)
+            self.pages = []
+            self.new_page_calls = 0
+
+        def new_page(self):
+            self.new_page_calls += 1
+            time.sleep(0.05)
+            return super().new_page()
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: SlowNewPageContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    SlowNewPageContext.created.clear()
+    SlowNewPageContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+    barrier = threading.Barrier(2)
+    pages = []
+    errors = []
+
+    def get_page():
+        try:
+            barrier.wait(timeout=2)
+            pages.append(manager.page_for(task_id="same-task"))
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=get_page), threading.Thread(target=get_page)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+    manager.close_all()
+
+    assert errors == []
+    assert len(pages) == 2
+    assert pages[0] is pages[1]
+    assert len(SlowNewPageContext.created) == 1
+    assert SlowNewPageContext.created[0].new_page_calls == 1
+
+
+def test_session_manager_process_registry_shares_context_across_managers(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    settings = plugin.config.load_config(
+        FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    ).settings
+    first_manager = plugin.session_manager.SessionManager(settings)
+    second_manager = plugin.session_manager.SessionManager(settings)
+
+    first_page = first_manager.page_for(task_id="task-a")
+    second_page = second_manager.page_for(task_id="task-b")
+    first_manager.close_all()
+
+    assert first_page is not second_page
+    assert len(FakeBrowserContext.created) == 1
+    assert len(FakeBrowserContext.created[0].pages) == 2
+    assert FakeBrowserContext.closed == []
+
+    second_manager.close_all()
+
+    assert FakeBrowserContext.closed == FakeBrowserContext.created
+    reacquired = first_manager.page_for(task_id="task-c")
+    assert reacquired is not first_page
+    assert len(FakeBrowserContext.created) == 2
+    first_manager.close_all()
+
+
+def test_session_manager_acquire_waits_for_final_close_teardown(
+    plugin, monkeypatch, tmp_path
+):
+    close_started = threading.Event()
+    release_close = threading.Event()
+
+    class BlockingCloseContext(FakeBrowserContext):
+        def close(self):
+            close_started.set()
+            assert release_close.wait(timeout=2)
+            super().close()
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: BlockingCloseContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    BlockingCloseContext.created.clear()
+    BlockingCloseContext.closed.clear()
+    settings = plugin.config.load_config(
+        FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    ).settings
+    closing_manager = plugin.session_manager.SessionManager(settings)
+    acquiring_manager = plugin.session_manager.SessionManager(settings)
+    first_page = closing_manager.page_for(task_id="task-a")
+    acquired_pages = []
+
+    close_thread = threading.Thread(target=closing_manager.close_all)
+    close_thread.start()
+    assert close_started.wait(timeout=2)
+
+    acquire_thread = threading.Thread(
+        target=lambda: acquired_pages.append(
+            acquiring_manager.page_for(task_id="task-b")
+        )
+    )
+    acquire_thread.start()
+    time.sleep(0.05)
+
+    assert acquire_thread.is_alive()
+    assert acquired_pages == []
+    assert len(BlockingCloseContext.created) == 1
+
+    release_close.set()
+    close_thread.join(timeout=2)
+    acquire_thread.join(timeout=2)
+    acquiring_manager.close_all()
+
+    assert not close_thread.is_alive()
+    assert not acquire_thread.is_alive()
+    assert acquired_pages and acquired_pages[0] is not first_page
+    assert len(BlockingCloseContext.created) == 2
+    assert BlockingCloseContext.closed == BlockingCloseContext.created
 
 
 def test_status_redacts_profile_path(plugin, monkeypatch, tmp_path):
@@ -567,3 +932,159 @@ def test_session_key_namespaces_task_and_session(plugin, tmp_path):
 
     assert manager._session_key(task_id="same") == "task:same"
     assert manager._session_key(session_id="same") == "session:same"
+
+
+def test_session_id_and_task_id_pages_are_isolated(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+
+    handlers["browser_navigate"]({"url": "https://example.test/task"}, task_id="same")
+    handlers["browser_navigate"]({"url": "https://example.test/session"}, session_id="same")
+    handlers["browser_type"]({"selector": "#q", "text": "task-text"}, task_id="same")
+    handlers["browser_type"]({"selector": "#q", "text": "session-text"}, session_id="same")
+
+    assert len(FakeBrowserContext.created) == 1
+    task_page = FakeBrowserContext.created[0].pages[0]
+    session_page = FakeBrowserContext.created[0].pages[1]
+    assert task_page.url == "https://example.test/task"
+    assert session_page.url == "https://example.test/session"
+    assert ("fill", "#q", "task-text") in task_page.events
+    assert ("fill", "#q", "session-text") in session_page.events
+    assert "session-text" not in json.dumps(task_page.events)
+    assert "task-text" not in json.dumps(session_page.events)
+
+    task_page.console_messages = [{"type": "log", "text": "task-only"}]
+    session_page.console_messages = [{"type": "log", "text": "session-only"}]
+    assert json.loads(handlers["browser_console"]({}, task_id="same"))["messages"] == [
+        {"type": "log", "text": "task-only"}
+    ]
+    assert json.loads(handlers["browser_console"]({}, session_id="same"))["messages"] == [
+        {"type": "log", "text": "session-only"}
+    ]
+
+
+def test_ref_maps_are_per_page_and_cleared_on_navigation(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+
+    handlers["browser_snapshot"]({}, task_id="task-a")
+    handlers["browser_snapshot"]({}, task_id="task-b")
+    assert json.loads(handlers["browser_click"]({"ref": "@e2"}, task_id="task-a"))["clicked"] is True
+
+    assert len(FakeBrowserContext.created) == 1
+    page_a = FakeBrowserContext.created[0].pages[0]
+    page_b = FakeBrowserContext.created[0].pages[1]
+    assert page_a.events == [("click", "#go")]
+    assert page_b.events == []
+
+    handlers["browser_navigate"]({"url": "https://example.test/new"}, task_id="task-a")
+    stale = json.loads(handlers["browser_click"]({"ref": "@e2"}, task_id="task-a"))
+    assert "unknown browser ref" in stale["error"]
+
+
+def test_console_output_is_bounded_and_redacts_nested_secrets(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_snapshot"]({}, task_id="console-bounds")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.console_messages = [
+        {"type": "log", "text": f"line-{index} Bearer secret-token-{index}"}
+        for index in range(250)
+    ]
+
+    output = json.loads(handlers["browser_console"]({}, task_id="console-bounds"))
+
+    assert len(output["messages"]) == 200
+    assert output["messages"][0]["text"].startswith("line-50")
+    assert "secret-token" not in json.dumps(output)
+    assert "Bearer [REDACTED]" in json.dumps(output)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost/admin",
+        "http://localhost.localdomain/admin",
+        "http://metadata.google.internal/computeMetadata/v1",
+        "http://169.254.169.254/latest/meta-data",
+        "http://169.254.170.2/v2/credentials",
+        "http://127.0.0.1:9222/json",
+        "http://[::1]/",
+        "http://10.0.0.5/",
+        "http://172.16.0.1/",
+        "http://192.168.1.1/",
+        "http://0.0.0.0/",
+        "http://224.0.0.1/",
+        "file:///etc/passwd",
+        "data:text/html,secret",
+        "blob:https://example.test/id",
+        "javascript:alert(1)",
+        "ftp://example.test/file",
+        "https://user:password@example.test/",
+    ],
+)
+def test_url_guard_blocks_private_metadata_credentials_and_unsafe_schemes(
+    plugin, monkeypatch, tmp_path, url
+):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+
+    result = json.loads(handlers["browser_navigate"]({"url": url}, task_id="guard"))
+
+    assert "blocked" in result["error"]
+    serialized = json.dumps(result)
+    assert "password" not in serialized
+    assert "/etc/passwd" not in serialized
+    assert "secret" not in serialized
+
+
+def test_url_guard_blocks_dns_rebinding_to_private_ip(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        plugin.adapter.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("127.0.0.1", 0))],
+    )
+
+    result = json.loads(
+        handlers["browser_navigate"]({"url": "https://rebind.test"}, task_id="guard"),
+    )
+    assert "blocked private or metadata browser URL" in result["error"]
+
+
+def test_get_images_filters_unreturnable_and_redacts_sensitive_urls(
+    plugin, monkeypatch, tmp_path
+):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_snapshot"]({}, task_id="images")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.images.extend(
+        [
+            {"src": "https://example.test/ok.jpg?api_key=secret", "alt": "ok"},
+            {"src": "https://user:pass@example.test/creds.jpg", "alt": "creds"},
+            {"src": "http://localhost/private.jpg", "alt": "local"},
+            {"src": "file:///tmp/private.jpg", "alt": "file"},
+        ]
+    )
+
+    result = json.loads(handlers["browser_get_images"]({}, task_id="images"))
+
+    assert [image["alt"] for image in result["images"]] == ["A", "ok"]
+    serialized = json.dumps(result)
+    assert "secret" not in serialized
+    assert "pass" not in serialized
+    assert "localhost" not in serialized
+    assert "file:///" not in serialized
+
+
+def test_preflight_fails_closed_for_invalid_config_even_when_sdk_exists(
+    plugin, monkeypatch
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    ctx = FakeCtx({"user_data_dir": "/"})
+
+    plugin.register(ctx)
+
+    assert [command["name"] for command in ctx.registered_commands] == ["cloak"]
+    assert ctx.registered_tools == []
+    status = ctx.registered_commands[0]["handler"]("status")
+    assert "ready: False" in status
+    assert "dedicated CloakBrowser profile" in status
