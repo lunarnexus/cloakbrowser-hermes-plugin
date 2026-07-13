@@ -14,7 +14,8 @@ Current foundation behavior:
 ## Requirements
 
 1. Hermes Agent, obviously.
-2. Python package `cloakbrowser` installed in the Hermes venv.
+2. The CloakBrowser Python SDK installed in the Hermes venv: `python -m pip install cloakbrowser`.
+   Package reference: https://pypi.org/project/cloakbrowser/ (`CloakHQ/CloakBrowser`).
 3. A local desktop session for future browser sessions (headless=false).
 
 ## Install
