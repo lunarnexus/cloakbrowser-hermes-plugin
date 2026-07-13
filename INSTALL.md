@@ -78,7 +78,16 @@ plugins:
         color_scheme: null
         user_agent: null
         args: []
+        # Write CloakBrowser SDK banner marker before launch. Default: true.
+        auto_acknowledge_banner: true
+        # Optional tri-state. Omit/null or true leaves SDK/env behavior unchanged.
+        # false sets CLOAKBROWSER_AUTO_UPDATE=false only when the env var is absent.
+        auto_update: null
 ```
+
+`auto_acknowledge_banner` writes a fresh integer Unix timestamp to CloakBrowser's `.welcome_shown` marker in `cloakbrowser.download.get_cache_dir()` before SDK launch. Marker write failures are non-fatal and do not block launch.
+
+`auto_update` controls the SDK auto-update environment only when explicitly disabled. Environment precedence is strict: an existing `CLOAKBROWSER_AUTO_UPDATE` value always wins and is never overwritten. If `auto_update: false` and the env var is absent, the plugin sets `CLOAKBROWSER_AUTO_UPDATE=false` before launch. If `auto_update` is omitted, `null`, or `true`, the plugin leaves SDK defaults and the environment unchanged.
 
 Safety rules for `user_data_dir`:
 - Use a dedicated CloakBrowser profile directory.

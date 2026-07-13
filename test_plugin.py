@@ -251,6 +251,27 @@ def test_sdk_banner_marker_not_written_when_disabled(plugin, monkeypatch, tmp_pa
     assert not (cache_dir / ".welcome_shown").exists()
 
 
+def test_sdk_banner_marker_write_failure_does_not_block_launch(plugin, monkeypatch, tmp_path):
+    cache_path = tmp_path / "cache-is-file"
+    cache_path.write_text("not a directory")
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        cache_path,
+        lambda **options: FakeBrowserContext(**options),
+    )
+    ctx = FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    plugin.register(ctx)
+
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="banner-fail")
+    )
+
+    assert result["url"] == "about:blank"
+    assert FakeBrowserContext.created[-1].options["user_data_dir"] == str(
+        (tmp_path / "profile").resolve()
+    )
+
+
 def test_auto_update_false_sets_env_only_when_absent(plugin, monkeypatch, tmp_path):
     monkeypatch.delenv("CLOAKBROWSER_AUTO_UPDATE", raising=False)
     _install_fake_cloakbrowser(
@@ -342,6 +363,35 @@ def test_auto_update_true_leaves_env_absent(plugin, monkeypatch, tmp_path):
 
     assert result["url"] == "about:blank"
     assert "CLOAKBROWSER_AUTO_UPDATE" not in os.environ
+
+
+def test_auto_update_string_values_parse_as_optional_bool(plugin, tmp_path):
+    true_result = plugin.config.load_config(
+        FakeCtx({"user_data_dir": str(tmp_path / "profile-true"), "auto_update": "yes"})
+    )
+    false_result = plugin.config.load_config(
+        FakeCtx({"user_data_dir": str(tmp_path / "profile-false"), "auto_update": "off"})
+    )
+
+    assert true_result.valid is True
+    assert true_result.settings.auto_update is True
+    assert false_result.valid is True
+    assert false_result.settings.auto_update is False
+
+
+def test_invalid_auto_update_value_fails_config_and_blocks_tool_override(plugin, monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "cloakbrowser", types.ModuleType("cloakbrowser"))
+    ctx = FakeCtx({"user_data_dir": str(tmp_path / "profile"), "auto_update": "sometimes"})
+
+    parsed = plugin.config.load_config(ctx)
+    plugin.register(ctx)
+
+    assert parsed.valid is False
+    assert parsed.settings.auto_update is None
+    assert parsed.errors == ["auto_update must be a boolean or null"]
+    assert [command["name"] for command in ctx.registered_commands] == ["cloak"]
+    assert ctx.registered_tools == []
+    assert "auto_update must be a boolean or null" in ctx.registered_commands[0]["handler"]("status")
 
 
 def test_sdk_startup_stderr_not_swallowed_on_failure(plugin, monkeypatch, tmp_path, capsys):
