@@ -606,6 +606,7 @@ class FakePage:
         self.url = "about:blank"
         self.title_value = "Fake"
         self.events = []
+        self.closed_flag = False
         self.mouse = FakeMouse(self)
         self.keyboard = FakeKeyboard(self)
         self.accessibility = FakeAccessibility(self)
@@ -653,6 +654,12 @@ class FakePage:
         self.url = url
         self.events.append(("goto", url, wait_until))
         return types.SimpleNamespace(status=204, ok=True)
+
+    def close(self):
+        self.closed_flag = True
+
+    def is_closed(self):
+        return self.closed_flag
 
     def title(self):
         return self.title_value
@@ -726,7 +733,12 @@ class FakeBrowserContext:
 
     def close(self):
         self.closed_flag = True
+        for page in self.pages:
+            page.close()
         self.closed.append(self)
+
+    def is_closed(self):
+        return self.closed_flag
 
 
 def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeypatch, tmp_path):
@@ -1324,6 +1336,56 @@ def test_session_manager_shares_context_by_profile_and_closes_lifecycle(
     reacquired = manager.page_for(task_id="after-close")
     assert reacquired is not first
     assert len(FakeBrowserContext.created) == 2
+    manager.close_all()
+
+
+def test_session_manager_external_close_evicts_stale_session_and_relaunches(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    first = manager.page_for(task_id="same-task")
+    first_context = FakeBrowserContext.created[0]
+    first_context.close()
+
+    reacquired = manager.page_for(task_id="same-task")
+
+    assert reacquired is not first
+    assert len(FakeBrowserContext.created) == 2
+    assert manager.status()["connected"] is True
+    manager.close_all()
+
+
+def test_session_manager_status_drops_stale_external_close_sessions(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    manager.page_for(task_id="status-task")
+    FakeBrowserContext.created[0].close()
+
+    status = manager.status()
+
+    assert status["connected"] is False
+    assert status["sessions"] == 0
     manager.close_all()
 
 

@@ -120,7 +120,10 @@ class SessionManager:
                     _CONTEXT_REGISTRY_CONDITION.wait()
                 session = self._sessions.get(key)
                 if session is not None:
-                    return session.page
+                    if self._session_is_live(session):
+                        return session.page
+                    self._drop_session_locked(key, session)
+                    self._drop_dead_shared_context_locked(context_key)
                 if key not in self._creating_sessions:
                     self._creating_sessions.add(key)
                     break
@@ -160,12 +163,18 @@ class SessionManager:
         with _CONTEXT_REGISTRY_CONDITION:
             shared = self._contexts.get(context_key)
             if shared is not None and not shared.closing and not shared.creating:
-                self._closed = False
-                return shared
+                if not self._shared_context_is_live(shared):
+                    self._drop_dead_shared_context_locked(context_key, shared)
+                else:
+                    self._closed = False
+                    return shared
 
             while True:
                 shared = self._contexts.get(context_key)
                 if shared is not None and not shared.closing and not shared.creating:
+                    if not self._shared_context_is_live(shared):
+                        self._drop_dead_shared_context_locked(context_key, shared)
+                        continue
                     self._closed = False
                     return shared
                 shared = _CONTEXT_REGISTRY.get(context_key)
@@ -174,6 +183,9 @@ class SessionManager:
                     _CONTEXT_REGISTRY[context_key] = shared
                     create_owner = True
                     break
+                if not shared.creating and not shared.closing and not self._shared_context_is_live(shared):
+                    self._drop_dead_shared_context_locked(context_key, shared)
+                    continue
                 if not shared.creating and not shared.closing:
                     shared.ref_count += 1
                     self._contexts[context_key] = shared
@@ -308,6 +320,11 @@ class SessionManager:
         self.cleanup_screenshot_temp_dirs(include_active=True)
 
     def status(self) -> dict[str, object]:
+        with _CONTEXT_REGISTRY_CONDITION:
+            for key, session in list(self._sessions.items()):
+                if not self._session_is_live(session):
+                    self._drop_session_locked(key, session)
+            self._drop_dead_shared_context_locked(self._context_key())
         return {
             "ready": True,
             "connected": bool(self._sessions),
@@ -315,3 +332,78 @@ class SessionManager:
             "mode": "direct-sdk",
             "sessions": len(self._sessions),
         }
+
+    def _session_is_live(self, session: BrowserSession) -> bool:
+        return self._page_is_live(session.page) and self._context_is_live(session.context)
+
+    def _shared_context_is_live(self, shared: SharedBrowserContext) -> bool:
+        if shared.context is None or shared.creating or shared.closing:
+            return False
+        return self._context_is_live(shared.context)
+
+    def _context_is_live(self, context: Any) -> bool:
+        if context is None:
+            return False
+        is_closed = getattr(context, "is_closed", None)
+        if callable(is_closed):
+            try:
+                if bool(is_closed()):
+                    return False
+            except Exception:
+                return False
+        for attr in ("closed", "closed_flag"):
+            value = getattr(context, attr, None)
+            if isinstance(value, bool) and value:
+                return False
+        browser = getattr(context, "browser", None)
+        if browser is not None and not self._browser_is_live(browser):
+            return False
+        return True
+
+    def _browser_is_live(self, browser: Any) -> bool:
+        is_connected = getattr(browser, "is_connected", None)
+        if callable(is_connected):
+            try:
+                return bool(is_connected())
+            except Exception:
+                return False
+        is_closed = getattr(browser, "is_closed", None)
+        if callable(is_closed):
+            try:
+                return not bool(is_closed())
+            except Exception:
+                return False
+        return True
+
+    def _page_is_live(self, page: Any) -> bool:
+        if page is None:
+            return False
+        is_closed = getattr(page, "is_closed", None)
+        if callable(is_closed):
+            try:
+                return not bool(is_closed())
+            except Exception:
+                return False
+        for attr in ("closed", "closed_flag"):
+            value = getattr(page, attr, None)
+            if isinstance(value, bool):
+                return not value
+        return True
+
+    def _drop_session_locked(self, key: str, session: BrowserSession | None = None) -> None:
+        current = self._sessions.get(key)
+        if current is None:
+            return
+        if session is not None and current is not session:
+            return
+        self._sessions.pop(key, None)
+
+    def _drop_dead_shared_context_locked(
+        self, context_key: str, shared: SharedBrowserContext | None = None
+    ) -> None:
+        shared = shared or self._contexts.get(context_key) or _CONTEXT_REGISTRY.get(context_key)
+        if shared is None or shared.creating or shared.closing or self._shared_context_is_live(shared):
+            return
+        self._contexts.pop(context_key, None)
+        if _CONTEXT_REGISTRY.get(context_key) is shared:
+            _CONTEXT_REGISTRY.pop(context_key, None)
