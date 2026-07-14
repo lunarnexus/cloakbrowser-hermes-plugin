@@ -161,6 +161,52 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
     assert "geoip requires proxy" in "; ".join(parsed.warnings)
 
 
+def test_config_parses_stringified_empty_args_list(plugin, tmp_path):
+    parsed = plugin.config.load_config(
+        FakeCtx(
+            {
+                "user_data_dir": str(tmp_path / "profile"),
+                "args": "[]",
+            }
+        )
+    )
+
+    assert parsed.valid is True
+    assert parsed.settings.args == []
+
+
+def test_config_parses_stringified_args_list_with_values(plugin, tmp_path):
+    parsed = plugin.config.load_config(
+        FakeCtx(
+            {
+                "user_data_dir": str(tmp_path / "profile"),
+                "args": '["--no-sandbox"]',
+            }
+        )
+    )
+
+    assert parsed.valid is True
+    assert parsed.settings.args == ["--no-sandbox"]
+
+
+def test_config_rejects_malformed_stringified_args(plugin, tmp_path):
+    parsed = plugin.config.load_config(
+        FakeCtx(
+            {
+                "user_data_dir": str(tmp_path / "profile"),
+                "args": "[",
+            }
+        )
+    )
+
+    assert parsed.valid is False
+    assert any(
+        "args must be a list of strings; string values must decode to a JSON/YAML list of strings"
+        in error
+        for error in parsed.errors
+    )
+
+
 def test_runtime_hermes_config_loader_exception_fails_closed(plugin, monkeypatch):
     def broken_loader():
         raise RuntimeError("boom")
@@ -694,6 +740,43 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
     assert os.environ["CLOAKBROWSER_AUTO_UPDATE"] == "false"
 
 
+def test_register_parses_stringified_runtime_args_from_hermes_config(
+    plugin, monkeypatch, tmp_path
+):
+    FakeBrowserContext.created.clear()
+    profile = tmp_path / "runtime-profile"
+    runtime_config = {
+        "plugins": {
+            "entries": {
+                "cloakbrowser-hermes-plugin": {
+                    "config": {
+                        "user_data_dir": str(profile),
+                        "args": '["--no-sandbox"]',
+                    }
+                }
+            }
+        }
+    }
+    _install_hermes_config_loader(monkeypatch, runtime_config)
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        tmp_path / "cache",
+        lambda **options: FakeBrowserContext(**options),
+    )
+    ctx = RuntimeCtx()
+
+    parsed = plugin.config.load_config(ctx)
+    plugin.register(ctx)
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="runtime-args")
+    )
+
+    assert parsed.valid is True
+    assert parsed.settings.args == ["--no-sandbox"]
+    assert result["url"] == "about:blank"
+    assert FakeBrowserContext.created[-1].options["args"] == ["--no-sandbox"]
+
+
 def test_runtime_auto_update_env_var_wins(plugin, monkeypatch, tmp_path):
     monkeypatch.setenv("CLOAKBROWSER_AUTO_UPDATE", "true")
     runtime_config = {
@@ -748,7 +831,7 @@ def test_invalid_runtime_config_from_hermes_loader_blocks_tool_override(plugin, 
 
     assert parsed.valid is False
     assert "headless must be a boolean" in parsed.errors
-    assert "args must be a list of strings" in parsed.errors
+    assert any("args must be a list of strings" in error for error in parsed.errors)
     assert [command["name"] for command in ctx.registered_commands] == ["cloak"]
     assert ctx.registered_tools == []
     status = ctx.registered_commands[0]["handler"]("status")

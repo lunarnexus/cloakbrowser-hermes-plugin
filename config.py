@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
@@ -106,6 +107,29 @@ def _optional_string(value: Any) -> str | None:
         stripped = value.strip()
         return stripped or None
     return str(value)
+
+
+def _parse_args(raw: Any, errors: list[str]) -> list[str]:
+    if raw is None:
+        return []
+
+    value = raw
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            errors.append(
+                "args must be a list of strings; string values must decode to a JSON/YAML list of strings"
+            )
+            return []
+
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        errors.append(
+            "args must be a list of strings; string values must decode to a JSON/YAML list of strings"
+        )
+        return []
+
+    return list(value)
 
 
 def _hermes_home() -> Path:
@@ -229,12 +253,7 @@ def load_config(ctx: Any) -> ConfigResult:
         errors.append("human_preset must be one of: careful, default")
         preset = "default"
 
-    args = raw.get("args", [])
-    if args is None:
-        args = []
-    if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
-        errors.append("args must be a list of strings")
-        args = []
+    args = _parse_args(raw.get("args", []), errors)
 
     optional_values = {key: _optional_string(raw.get(key)) for key in _OPTIONAL_STRINGS}
     geoip = _parse_bool(raw.get("geoip"), False, "geoip", errors)
