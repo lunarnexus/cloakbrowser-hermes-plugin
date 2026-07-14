@@ -49,6 +49,35 @@ class FakeCtx:
         )
 
 
+class RuntimeCtx:
+    """Hermes-like plugin context: registration API, no preloaded config attrs."""
+
+    def __init__(self):
+        self.registered_tools = []
+        self.registered_commands = []
+
+    def register_tool(self, **kwargs):
+        self.registered_tools.append(kwargs)
+
+    def register_command(self, name, handler, description="", args_hint=""):
+        self.registered_commands.append(
+            {
+                "name": name,
+                "handler": handler,
+                "description": description,
+                "args_hint": args_hint,
+            }
+        )
+
+
+def _install_hermes_config_loader(monkeypatch, runtime_config):
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_config = types.ModuleType("hermes_cli.config")
+    setattr(hermes_config, "load_config", lambda: runtime_config)
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
+
+
 @pytest.fixture()
 def plugin(monkeypatch, tmp_path):
     hermes_constants = types.ModuleType("hermes_constants")
@@ -580,8 +609,9 @@ class FakeBrowserContext:
         self.closed.append(self)
 
 
-def test_register_loads_runtime_config_from_hermes_config(plugin, monkeypatch, tmp_path):
+def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeypatch, tmp_path):
     FakeBrowserContext.created.clear()
+    monkeypatch.delenv("CLOAKBROWSER_AUTO_UPDATE", raising=False)
     profile = tmp_path / "runtime-profile"
     runtime_config = {
         "plugins": {
@@ -591,39 +621,22 @@ def test_register_loads_runtime_config_from_hermes_config(plugin, monkeypatch, t
                     "config": {
                         "user_data_dir": str(profile),
                         "headless": False,
-                        "args": ["--window-size=123,456"],
+                        "humanize": False,
+                        "stealth_args": False,
+                        "args": [],
+                        "auto_acknowledge_banner": False,
+                        "auto_update": False,
                     },
                 }
             }
         }
     }
-    hermes_cli = types.ModuleType("hermes_cli")
-    hermes_config = types.ModuleType("hermes_cli.config")
-    setattr(hermes_config, "load_config", lambda: runtime_config)
-    fake_sdk = types.ModuleType("cloakbrowser")
-    setattr(fake_sdk, "create", lambda **options: FakeBrowserContext(**options))
-    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
-    monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
-    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
-
-    class RuntimeCtx:
-        def __init__(self):
-            self.registered_tools = []
-            self.registered_commands = []
-
-        def register_tool(self, **kwargs):
-            self.registered_tools.append(kwargs)
-
-        def register_command(self, name, handler, description="", args_hint=""):
-            self.registered_commands.append(
-                {
-                    "name": name,
-                    "handler": handler,
-                    "description": description,
-                    "args_hint": args_hint,
-                }
-            )
-
+    _install_hermes_config_loader(monkeypatch, runtime_config)
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        tmp_path / "cache",
+        lambda **options: FakeBrowserContext(**options),
+    )
     ctx = RuntimeCtx()
 
     parsed = plugin.config.load_config(ctx)
@@ -632,12 +645,83 @@ def test_register_loads_runtime_config_from_hermes_config(plugin, monkeypatch, t
         ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="runtime-config")
     )
 
+    assert parsed.valid is True
     assert parsed.settings.headless is False
+    assert parsed.settings.humanize is False
+    assert parsed.settings.stealth_args is False
+    assert parsed.settings.args == []
+    assert parsed.settings.auto_acknowledge_banner is False
+    assert parsed.settings.auto_update is False
     assert parsed.settings.user_data_dir == str(profile.resolve())
     assert result["url"] == "about:blank"
     assert FakeBrowserContext.created[-1].options["headless"] is False
+    assert FakeBrowserContext.created[-1].options["humanize"] is False
+    assert FakeBrowserContext.created[-1].options["stealth_args"] is False
     assert FakeBrowserContext.created[-1].options["user_data_dir"] == str(profile.resolve())
-    assert FakeBrowserContext.created[-1].options["args"] == ["--window-size=123,456"]
+    assert FakeBrowserContext.created[-1].options["args"] == []
+    assert os.environ["CLOAKBROWSER_AUTO_UPDATE"] == "false"
+
+
+def test_runtime_auto_update_env_var_wins(plugin, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLOAKBROWSER_AUTO_UPDATE", "true")
+    runtime_config = {
+        "plugins": {
+            "entries": {
+                "cloakbrowser-hermes-plugin": {
+                    "config": {
+                        "user_data_dir": str(tmp_path / "profile"),
+                        "auto_update": False,
+                    }
+                }
+            }
+        }
+    }
+    _install_hermes_config_loader(monkeypatch, runtime_config)
+    _install_fake_cloakbrowser(
+        monkeypatch,
+        tmp_path / "cache",
+        lambda **options: FakeBrowserContext(**options),
+    )
+    ctx = RuntimeCtx()
+
+    plugin.register(ctx)
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="auto-update-env")
+    )
+
+    assert result["url"] == "about:blank"
+    assert os.environ["CLOAKBROWSER_AUTO_UPDATE"] == "true"
+
+
+def test_invalid_runtime_config_from_hermes_loader_blocks_tool_override(plugin, monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "cloakbrowser", types.ModuleType("cloakbrowser"))
+    runtime_config = {
+        "plugins": {
+            "entries": {
+                "cloakbrowser-hermes-plugin": {
+                    "config": {
+                        "user_data_dir": str(tmp_path / "profile"),
+                        "headless": "sometimes",
+                        "args": ["--ok", 123],
+                    }
+                }
+            }
+        }
+    }
+    _install_hermes_config_loader(monkeypatch, runtime_config)
+    ctx = RuntimeCtx()
+
+    parsed = plugin.config.load_config(ctx)
+    plugin.register(ctx)
+
+    assert parsed.valid is False
+    assert "headless must be a boolean" in parsed.errors
+    assert "args must be a list of strings" in parsed.errors
+    assert [command["name"] for command in ctx.registered_commands] == ["cloak"]
+    assert ctx.registered_tools == []
+    status = ctx.registered_commands[0]["handler"]("status")
+    assert "headless must be a boolean" in status
+    assert "args must be a list of strings" in status
 
 
 def _registered_browser_tools(plugin, monkeypatch, tmp_path):
