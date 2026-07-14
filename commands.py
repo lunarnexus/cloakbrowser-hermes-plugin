@@ -18,7 +18,10 @@ def handle_slash(
     preflight: PreflightResult,
     manager: SessionManager | None,
 ) -> str:
-    argv = shlex.split(raw_args or "")
+    try:
+        argv = shlex.split(raw_args or "")
+    except ValueError:
+        return "Usage: /cloak [status|help]"
     sub = (argv[0] if argv else "status").lower()
 
     if sub in {"help", "--help", "-h"}:

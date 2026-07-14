@@ -24,22 +24,25 @@ Use the official Hermes plugin workflow:
 
 ```bash
 hermes plugins install https://github.com/<owner>/cloakbrowser-hermes-plugin.git --enable
+hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
 Or, after the repository is published under GitHub shorthand:
 
 ```bash
 hermes plugins install <owner>/cloakbrowser-hermes-plugin --enable
+hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
 Start a new Hermes session after enabling the plugin.
 
 ## Local development install
 
-For a workspace checkout, install or link the plugin using the Hermes plugin workflow for your active profile. Example development layout:
+For a workspace checkout, use a supported local file URL or link the plugin into the profile plugin directory:
 
 ```bash
-hermes plugins install /absolute/path/to/cloakbrowser-hermes-plugin --enable
+hermes plugins install file:///absolute/path/to/cloakbrowser-hermes-plugin --enable
+hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
 If your Hermes version does not support local path installs, place the checkout under the active profile plugin directory and enable it:
@@ -48,7 +51,7 @@ If your Hermes version does not support local path installs, place the checkout 
 mkdir -p ~/.hermes/profiles/<profile>/plugins
 ln -sfn /absolute/path/to/cloakbrowser-hermes-plugin \
   ~/.hermes/profiles/<profile>/plugins/cloakbrowser-hermes-plugin
-hermes plugins enable cloakbrowser-hermes-plugin
+hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
 Replace `<profile>` with the Hermes profile you intend to use. Plugin changes take effect in a new session.

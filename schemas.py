@@ -38,6 +38,7 @@ FALLBACK_SCHEMAS = {
             "properties": {
                 "question": {"type": "string"},
                 "annotate": {"type": "boolean", "default": False},
+                "full_page": {"type": "boolean", "default": False},
             },
         },
     },

@@ -148,19 +148,37 @@ class CloakBrowserAdapter:
         current_url = getattr(page, "url", str(url))
         self._assert_safe_page_url(current_url)
         self._clear_ref_map(page)
-        return {
+        title = ""
+        page_title = getattr(page, "title", None)
+        if callable(page_title):
+            try:
+                title = str(self.run(page_title()) or "")
+            except Exception:
+                title = ""
+        snapshot_result = self._snapshot(page, {"full": False})
+        result = {
+            "success": True,
             "url": current_url,
+            "title": title,
             "status": getattr(response, "status", None),
             "ok": getattr(response, "ok", None),
         }
+        for key in ("snapshot", "element_count", "pending_dialogs", "frame_tree"):
+            if key in snapshot_result:
+                result[key] = snapshot_result[key]
+        return result
 
-    def _snapshot(self, page: Any, _args: dict[str, Any]) -> dict[str, Any]:
+    def _snapshot(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
         self._assert_safe_page_url(getattr(page, "url", None))
         accessibility = getattr(page, "accessibility", None)
         snapshot_method = getattr(accessibility, "snapshot", None)
         source = "accessibility"
+        full = bool(args.get("full", False))
         if callable(snapshot_method):
-            snapshot = self.run(snapshot_method())
+            try:
+                snapshot = self.run(snapshot_method(interesting_only=not full))
+            except TypeError:
+                snapshot = self.run(snapshot_method())
         else:
             source = "dom-text-fallback"
             snapshot = self.run(
@@ -170,12 +188,18 @@ class CloakBrowserAdapter:
         ref_map: dict[str, Any] = {}
         text = self._snapshot_text(snapshot, ref_map=ref_map)
         setattr(page, "_cloak_ref_map", ref_map)
-        return {
+        result = {
+            "success": True,
             "snapshot": text,
             "source": source,
             "url": getattr(page, "url", None),
             "refs": sorted(ref_map),
+            "element_count": len(ref_map),
         }
+        dialogs = self._public_dialogs(list(getattr(page, "_cloak_pending_dialogs", []) or []))
+        if dialogs:
+            result["pending_dialogs"] = dialogs
+        return result
 
     def _snapshot_text(
         self, snapshot: Any, indent: int = 0, ref_map: dict[str, Any] | None = None
@@ -377,18 +401,60 @@ class CloakBrowserAdapter:
         if args.get("annotate"):
             labels = self._annotation_labels(page)
             annotated = self._write_annotated_screenshot(path, labels)
-        result: dict[str, Any] = {
-            "ok": True,
-            "screenshot_path": str(path),
-            "mime_type": "image/png",
-            "annotated": annotated,
-        }
+        question = str(args.get("question") or "Describe what is visible in this browser screenshot.")
+        result: dict[str, Any] = self._vision_analysis(path, question)
+        result.update(
+            {
+                "success": True,
+                "screenshot_path": str(path),
+                "mime_type": "image/png",
+                "annotated": annotated,
+            }
+        )
         if args.get("annotate"):
             result["labels"] = [label["ref"] for label in labels]
             result["badge_to_ref"] = {str(label["badge"]): label["ref"] for label in labels}
             if not annotated:
                 result["note"] = "No drawable interactive element bounds were available for annotation."
         return result
+
+    def _vision_analysis(self, path: Path, question: str) -> dict[str, Any]:
+        import base64
+
+        from tools.vision_tools import (
+            _build_native_vision_tool_result,
+            _should_use_native_vision_fast_path,
+            vision_analyze_tool,
+        )
+
+        image_bytes = path.read_bytes()
+        data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
+
+        if _should_use_native_vision_fast_path():
+            native_result = _build_native_vision_tool_result(
+                image_url=str(path),
+                question=question,
+                image_data_url=data_url,
+                image_size_bytes=len(image_bytes),
+            )
+            meta = native_result.setdefault("meta", {})
+            meta["screenshot_path"] = str(path)
+            return native_result
+
+        analysis = self.run(vision_analyze_tool(str(path), question))
+        if isinstance(analysis, str):
+            parsed = json.loads(analysis)
+            if isinstance(parsed, dict):
+                parsed.setdefault(
+                    "analysis", parsed.get("analysis") or "Vision analysis returned no content."
+                )
+                return parsed
+        if isinstance(analysis, dict):
+            analysis.setdefault(
+                "analysis", analysis.get("analysis") or "Vision analysis returned no content."
+            )
+            return analysis
+        return {"analysis": str(analysis) or "Vision analysis returned no content."}
 
     def _new_screenshot_path(self) -> Path:
         if self.manager is not None:

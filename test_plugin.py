@@ -94,10 +94,29 @@ def plugin(monkeypatch, tmp_path):
         },
     )
 
+    vision_tools = types.ModuleType("tools.vision_tools")
+    setattr(vision_tools, "_should_use_native_vision_fast_path", lambda: False)
+    setattr(
+        vision_tools,
+        "_build_native_vision_tool_result",
+        lambda image_url, question, image_data_url, image_size_bytes: {
+            "kind": "native_vision",
+            "image_url": image_url,
+            "question": question,
+            "meta": {"image_size_bytes": image_size_bytes},
+        },
+    )
+
+    async def _vision_analyze_tool(image_url: str, user_prompt: str, model=None, task_id=None):
+        return json.dumps({"success": True, "analysis": f"vision:{user_prompt}", "image_url": image_url})
+
+    setattr(vision_tools, "vision_analyze_tool", _vision_analyze_tool)
+
     tools_pkg = types.ModuleType("tools")
     monkeypatch.setitem(sys.modules, "hermes_constants", hermes_constants)
     monkeypatch.setitem(sys.modules, "tools", tools_pkg)
     monkeypatch.setitem(sys.modules, "tools.browser_tool", browser_tool)
+    monkeypatch.setitem(sys.modules, "tools.vision_tools", vision_tools)
 
     for name in list(sys.modules):
         if name == "cloakbrowser_hermes_plugin_under_test" or name.startswith(
@@ -257,6 +276,17 @@ def test_register_adds_only_readonly_command_when_sdk_missing(plugin, monkeypatc
     assert ctx.registered_tools == []
     output = ctx.registered_commands[0]["handler"]("connect")
     assert "Usage: /cloak [status|help]" in output
+
+
+def test_cloak_command_malformed_quoted_input_returns_usage(plugin, monkeypatch):
+    monkeypatch.setattr(plugin.preflight, "sdk_available", lambda: False)
+    ctx = FakeCtx({"user_data_dir": "/tmp/profile"})
+
+    plugin.register(ctx)
+
+    handler = ctx.registered_commands[0]["handler"]
+    assert handler('"') == "Usage: /cloak [status|help]"
+    assert handler('status "oops') == "Usage: /cloak [status|help]"
 
 
 def test_register_overrides_tools_when_sdk_and_config_valid(
@@ -550,12 +580,24 @@ class FakeKeyboard:
 class FakeAccessibility:
     def __init__(self, page):
         self.page = page
+        self.calls = []
 
-    def snapshot(self):
+    def snapshot(self, interesting_only=True):
+        self.calls.append(interesting_only)
+        if interesting_only:
+            return {
+                "role": "WebArea",
+                "name": "Fake page",
+                "children": [{"role": "button", "name": "Go", "selector": "#go"}],
+            }
         return {
             "role": "WebArea",
             "name": "Fake page",
-            "children": [{"role": "button", "name": "Go", "selector": "#go"}],
+            "selector": 'internal:role=WebArea[name="Fake page"]',
+            "children": [
+                {"role": "button", "name": "Go", "selector": "#go"},
+                {"role": "textbox", "name": "Search", "selector": "#search"},
+            ],
         }
 
 
@@ -853,17 +895,22 @@ def _registered_browser_tools(plugin, monkeypatch, tmp_path):
 def test_browser_handlers_perform_direct_sdk_operations(plugin, monkeypatch, tmp_path):
     handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
 
-    assert (
-        json.loads(
-            handlers["browser_navigate"](
-                {"url": "https://example.test"}, task_id="task-a"
-            )
-        )["url"]
-        == "https://example.test"
+    navigate = json.loads(
+        handlers["browser_navigate"](
+            {"url": "https://example.test"}, task_id="task-a"
+        )
     )
+    assert navigate["success"] is True
+    assert navigate["url"] == "https://example.test"
+    assert navigate["title"] == "Fake"
+    assert "Fake page" in navigate["snapshot"]
+    assert navigate["element_count"] == 2
+
     snapshot = json.loads(handlers["browser_snapshot"]({}, task_id="task-a"))
+    assert snapshot["success"] is True
     assert "Fake page" in snapshot["snapshot"]
     assert "@e" in snapshot["snapshot"]
+    assert snapshot["element_count"] == 2
     assert (
         json.loads(handlers["browser_click"]({"ref": "@e2"}, task_id="task-a"))[
             "clicked"
@@ -906,6 +953,31 @@ def test_browser_handlers_perform_direct_sdk_operations(plugin, monkeypatch, tmp
             "height": 20,
         }
     ]
+
+
+def test_browser_snapshot_full_true_uses_non_compact_accessibility_snapshot(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="snapshot-full")
+    page = FakeBrowserContext.created[0].pages[0]
+
+    result = json.loads(handlers["browser_snapshot"]({"full": True}, task_id="snapshot-full"))
+
+    assert result["success"] is True
+    assert result["element_count"] == 3
+    assert page.accessibility.calls[-1] is False
+    assert "textbox Search" in result["snapshot"]
+
+
+def test_browser_snapshot_default_uses_compact_accessibility_snapshot(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="snapshot-compact")
+    page = FakeBrowserContext.created[0].pages[0]
+
+    result = json.loads(handlers["browser_snapshot"]({}, task_id="snapshot-compact"))
+
+    assert result["success"] is True
+    assert result["element_count"] == 2
+    assert page.accessibility.calls[-1] is True
 
 
 def test_browser_dialog_captures_bounded_dialogs_and_actions(plugin, monkeypatch, tmp_path):
@@ -1011,9 +1083,15 @@ def test_browser_vision_screenshots_to_safe_temp_file_and_redacts(plugin, monkey
     handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
     handlers["browser_navigate"]({"url": "https://example.test"}, task_id="vision-task")
 
-    result = json.loads(handlers["browser_vision"]({"annotate": True}, task_id="vision-task"))
+    result = json.loads(
+        handlers["browser_vision"](
+            {"question": "What is on this page?", "annotate": True},
+            task_id="vision-task",
+        )
+    )
 
-    assert result["ok"] is True
+    assert result["success"] is True
+    assert result["analysis"] == "vision:What is on this page?"
     assert result["mime_type"] == "image/png"
     assert result["annotated"] is True
     assert result["labels"]
@@ -1771,6 +1849,16 @@ def test_session_id_and_task_id_pages_are_isolated(plugin, monkeypatch, tmp_path
     assert "session-text" not in json.dumps(task_page.events)
     assert "task-text" not in json.dumps(session_page.events)
 
+
+def test_task_and_session_ids_route_to_distinct_pages(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+
+    handlers["browser_snapshot"]({}, task_id="same")
+    handlers["browser_snapshot"]({}, session_id="same")
+
+    assert len(FakeBrowserContext.created) == 1
+    task_page = FakeBrowserContext.created[0].pages[0]
+    session_page = FakeBrowserContext.created[0].pages[1]
     task_page.console_messages = [{"type": "log", "text": "task-only"}]
     session_page.console_messages = [{"type": "log", "text": "session-only"}]
     assert json.loads(handlers["browser_console"]({}, task_id="same"))["messages"] == [
@@ -1779,6 +1867,24 @@ def test_session_id_and_task_id_pages_are_isolated(plugin, monkeypatch, tmp_path
     assert json.loads(handlers["browser_console"]({}, session_id="same"))["messages"] == [
         {"type": "log", "text": "session-only"}
     ]
+
+
+def test_session_id_takes_precedence_when_both_task_and_session_are_supplied(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+
+    handlers["browser_snapshot"]({}, task_id="same")
+    handlers["browser_snapshot"]({}, session_id="same")
+
+    task_page = FakeBrowserContext.created[0].pages[0]
+    session_page = FakeBrowserContext.created[0].pages[1]
+    task_page.console_messages = [{"type": "log", "text": "task-only"}]
+    session_page.console_messages = [{"type": "log", "text": "session-only"}]
+
+    output = json.loads(
+        handlers["browser_console"]({}, task_id="same", session_id="same")
+    )
+
+    assert output["messages"] == [{"type": "log", "text": "session-only"}]
 
 
 def test_ref_maps_are_per_page_and_cleared_on_navigation(plugin, monkeypatch, tmp_path):
@@ -1795,8 +1901,10 @@ def test_ref_maps_are_per_page_and_cleared_on_navigation(plugin, monkeypatch, tm
     assert page_b.events == []
 
     handlers["browser_navigate"]({"url": "https://example.test/new"}, task_id="task-a")
-    stale = json.loads(handlers["browser_click"]({"ref": "@e2"}, task_id="task-a"))
-    assert "unknown browser ref" in stale["error"]
+    refreshed = json.loads(handlers["browser_click"]({"ref": "@e2"}, task_id="task-a"))
+    assert refreshed["clicked"] is True
+    assert page_a.events[-2] == ("goto", "https://example.test/new", "load")
+    assert page_a.events[-1] == ("click", "#go")
 
 
 def test_console_output_is_bounded_and_redacts_nested_secrets(plugin, monkeypatch, tmp_path):

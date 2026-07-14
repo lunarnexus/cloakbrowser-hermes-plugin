@@ -31,18 +31,21 @@ Preferred install path:
 
 ```bash
 hermes plugins install https://github.com/<owner>/cloakbrowser-hermes-plugin.git --enable
+hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
 After publication, GitHub shorthand is also supported by Hermes:
 
 ```bash
 hermes plugins install <owner>/cloakbrowser-hermes-plugin --enable
+hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
-For local development from this checkout:
+For local development from this checkout, use a supported local file URL:
 
 ```bash
-hermes plugins install /absolute/path/to/cloakbrowser-hermes-plugin --enable
+hermes plugins install file:///absolute/path/to/cloakbrowser-hermes-plugin --enable
+hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
 If local path installs are unavailable in your Hermes version, link the checkout into the active profile plugin directory:
@@ -51,7 +54,7 @@ If local path installs are unavailable in your Hermes version, link the checkout
 mkdir -p ~/.hermes/profiles/<profile>/plugins
 ln -sfn /absolute/path/to/cloakbrowser-hermes-plugin \
   ~/.hermes/profiles/<profile>/plugins/cloakbrowser-hermes-plugin
-hermes plugins enable cloakbrowser-hermes-plugin
+hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
 Replace `<profile>` with the profile being tested. Start a new Hermes session after enabling.
