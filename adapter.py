@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import functools
 import importlib
 import inspect
 import ipaddress
@@ -8,9 +10,10 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 try:
@@ -40,25 +43,181 @@ METADATA_IPS = {"169.254.169.254", "169.254.170.2"}
 MAX_REDACTED_TEXT = 20000
 
 
+_OWNER_SENTINEL_TYPES = (str, bytes, bytearray, int, float, bool, type(None), Path)
+
+
+class _OwnerThreadRunner:
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._jobs: list[tuple[Callable[[], Any], list[Any], list[BaseException | None], threading.Event]] = []
+        self._stopping = False
+        self._thread = threading.Thread(target=self._worker, name="cloakbrowser-sdk-owner", daemon=True)
+        self._thread.start()
+        atexit.register(self.close)
+
+    def call(self, func: Callable[[], Any]) -> Any:
+        if threading.current_thread() is self._thread:
+            return func()
+        done = threading.Event()
+        result_box: list[Any] = [None]
+        error_box: list[BaseException | None] = [None]
+        with self._condition:
+            if self._stopping:
+                raise RuntimeError("CloakBrowser SDK owner thread is closed")
+            self._jobs.append((func, result_box, error_box, done))
+            self._condition.notify_all()
+        while not done.wait(timeout=0.1):
+            if self._stopping:
+                raise RuntimeError("CloakBrowser SDK owner thread stopped before call completed")
+            if not self._thread.is_alive():
+                raise RuntimeError("CloakBrowser SDK owner thread exited before call completed")
+        if error_box[0] is not None:
+            raise error_box[0]
+        return result_box[0]
+
+    def close(self) -> None:
+        with self._condition:
+            if self._stopping:
+                return
+            self._stopping = True
+            while self._jobs:
+                _, _, error_box, done = self._jobs.pop(0)
+                error_box[0] = RuntimeError("CloakBrowser SDK owner thread closed before call completed")
+                done.set()
+            self._condition.notify_all()
+        self._thread.join(timeout=2)
+
+    def _worker(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while True:
+                with self._condition:
+                    while not self._jobs and not self._stopping:
+                        self._condition.wait()
+                    if self._stopping and not self._jobs:
+                        return
+                    func, result_box, error_box, done = self._jobs.pop(0)
+                try:
+                    value = func()
+                    if inspect.isawaitable(value):
+                        value = loop.run_until_complete(value)
+                    result_box[0] = value
+                except BaseException as exc:  # pragma: no cover - surfaced to caller
+                    error_box[0] = exc
+                finally:
+                    done.set()
+        finally:
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            finally:
+                loop.close()
+
+
+class _OwnedSDKProxy:
+    def __init__(self, owner: _OwnerThreadRunner, target: Any):
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_target", target)
+
+    def __getattr__(self, name: str) -> Any:
+        target = object.__getattribute__(self, "_target")
+        owner = object.__getattribute__(self, "_owner")
+        attr = owner.call(lambda: getattr(target, name))
+        if callable(attr):
+            return functools.wraps(attr)(
+                lambda *args, **kwargs: _wrap_owned_value(
+                    owner,
+                    owner.call(
+                        lambda: attr(
+                            *[_unwrap_owned_value(arg) for arg in args],
+                            **{key: _unwrap_owned_value(value) for key, value in kwargs.items()},
+                        )
+                    ),
+                )
+            )
+        return _wrap_owned_value(owner, attr)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        owner = object.__getattribute__(self, "_owner")
+        target = object.__getattribute__(self, "_target")
+        owner.call(lambda: setattr(target, name, _unwrap_owned_value(value)))
+
+
+def _unwrap_owned_value(value: Any) -> Any:
+    if isinstance(value, _OwnedSDKProxy):
+        return object.__getattribute__(value, "_target")
+    if isinstance(value, list):
+        return [_unwrap_owned_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_unwrap_owned_value(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _unwrap_owned_value(item) for key, item in value.items()}
+    return value
+
+
+def _wrap_owned_value(owner: _OwnerThreadRunner, value: Any) -> Any:
+    if isinstance(value, _OWNER_SENTINEL_TYPES):
+        return value
+    if isinstance(value, _OwnedSDKProxy):
+        return value
+    if isinstance(value, list):
+        return [_wrap_owned_value(owner, item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_wrap_owned_value(owner, item) for item in value)
+    if isinstance(value, dict):
+        return {key: _wrap_owned_value(owner, item) for key, item in value.items()}
+    if isinstance(value, set):
+        return {_wrap_owned_value(owner, item) for item in value}
+    if inspect.ismodule(value) or inspect.isclass(value) or inspect.isfunction(value) or inspect.ismethod(value):
+        return value
+    module_name = getattr(type(value), "__module__", "")
+    if module_name.startswith(("builtins", "types", "collections", "pathlib")):
+        return value
+    return _OwnedSDKProxy(owner, value)
+
+
 class CloakBrowserAdapter:
     """Direct-SDK boundary around CloakBrowser/Playwright-like APIs with Hermes parity guards."""
 
     def __init__(self, settings: CloakConfig, manager: Any | None = None):
         self.settings = settings
         self.manager = manager
+        self._owner = _OwnerThreadRunner()
+
+    def _adopt_owner(self, owner: _OwnerThreadRunner | None) -> _OwnerThreadRunner:
+        if owner is not None and owner is not self._owner:
+            previous_owner = self._owner
+            self._owner = owner
+            previous_owner.close()
+        return self._owner
+
+    def _shared_owner_from_manager(self) -> _OwnerThreadRunner | None:
+        if self.manager is None:
+            return None
+        context_key = getattr(self.manager, "_context_key", None)
+        contexts = getattr(self.manager, "_contexts", None)
+        if not callable(context_key) or not isinstance(contexts, dict):
+            return None
+        shared = contexts.get(context_key())
+        owner = getattr(shared, "owner", None)
+        return owner if isinstance(owner, _OwnerThreadRunner) else None
+
+    def _run_with_owner(self, owner: _OwnerThreadRunner, value: Any) -> Any:
+        if callable(value):
+            return _wrap_owned_value(owner, owner.call(value))
+        if inspect.isawaitable(value):
+            return _wrap_owned_value(owner, owner.call(lambda: value))
+        return _wrap_owned_value(owner, value)
 
     def run(self, value: Any) -> Any:
-        if inspect.isawaitable(value):
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                return asyncio.run(value)
-            raise RuntimeError(
-                "async CloakBrowser SDK calls are not supported inside an already-running event loop"
-            ) from None
-        return value
+        return self._run_with_owner(self._adopt_owner(self._shared_owner_from_manager()), value)
 
-    def create_context(self) -> Any:
+    def create_context(self, owner: _OwnerThreadRunner | None = None) -> Any:
+        owner = self._adopt_owner(owner)
         self._configure_sdk_environment()
         self._acknowledge_sdk_banner()
         sdk = importlib.import_module("cloakbrowser")
@@ -66,18 +225,18 @@ class CloakBrowserAdapter:
         for name in ("create", "launch_persistent_context"):
             factory = getattr(sdk, name, None)
             if callable(factory):
-                return self.run(factory(**options))
+                return self._run_with_owner(owner, lambda factory=factory: factory(**options))
         launch = getattr(sdk, "launch", None)
         if callable(launch):
             launch_options = {
                 key: value for key, value in options.items() if key != "user_data_dir"
             }
-            return self.run(launch(**launch_options))
+            return self._run_with_owner(owner, lambda launch=launch: launch(**launch_options))
         browser_cls = getattr(sdk, "CloakBrowser", None) or getattr(
             sdk, "Browser", None
         )
         if browser_cls is not None:
-            instance = self.run(browser_cls(**options))
+            instance = self._run_with_owner(owner, lambda: browser_cls(**options))
             for method in (
                 "launch_persistent_context",
                 "new_context",
@@ -86,9 +245,12 @@ class CloakBrowserAdapter:
             ):
                 member = getattr(instance, method, None)
                 if callable(member):
-                    return self.run(member())
+                    return self._run_with_owner(owner, member)
             return instance
         raise RuntimeError("cloakbrowser SDK has no supported browser/context factory")
+
+    def close(self) -> None:
+        self._owner.close()
 
     def _configure_sdk_environment(self) -> None:
         if (
@@ -117,6 +279,7 @@ class CloakBrowserAdapter:
             page = self.manager.page_for(
                 task_id=kwargs.get("task_id"), session_id=kwargs.get("session_id")
             )
+            self._adopt_owner(self._shared_owner_from_manager())
             handlers = {
                 "browser_navigate": self._navigate,
                 "browser_snapshot": self._snapshot,

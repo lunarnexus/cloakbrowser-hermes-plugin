@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
 import json
 import os
 import sys
@@ -741,6 +742,52 @@ class FakeBrowserContext:
         return self.closed_flag
 
 
+class AsyncLoopBoundPage(FakePage):
+    def __init__(self, loop_id):
+        super().__init__()
+        self.loop_id = loop_id
+
+    async def goto(self, url, wait_until="load"):  # type: ignore[override]
+        current_loop_id = id(asyncio.get_running_loop())
+        if current_loop_id != self.loop_id:
+            raise RuntimeError("cannot switch to a different thread (which happens to have exited)")
+        return super().goto(url, wait_until=wait_until)
+
+    async def title(self):  # type: ignore[override]
+        current_loop_id = id(asyncio.get_running_loop())
+        if current_loop_id != self.loop_id:
+            raise RuntimeError("cannot switch to a different thread (which happens to have exited)")
+        return super().title()
+
+
+class AsyncLoopBoundContext(FakeBrowserContext):
+    created = []
+    closed = []
+
+    def __init__(self, loop_id, **options):
+        self.loop_id = loop_id
+        super().__init__(**options)
+        self.pages = [AsyncLoopBoundPage(loop_id)]
+
+    async def new_page(self):
+        current_loop_id = id(asyncio.get_running_loop())
+        if current_loop_id != self.loop_id:
+            raise RuntimeError("cannot switch to a different thread (which happens to have exited)")
+        page = AsyncLoopBoundPage(self.loop_id)
+        self.pages.append(page)
+        return page
+
+    async def close(self):
+        current_loop_id = id(asyncio.get_running_loop())
+        if current_loop_id != self.loop_id:
+            raise RuntimeError("cannot switch to a different thread (which happens to have exited)")
+        super().close()
+
+
+async def create_async_loop_bound_context(**options):
+    return AsyncLoopBoundContext(id(asyncio.get_running_loop()), **options)
+
+
 def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeypatch, tmp_path):
     FakeBrowserContext.created.clear()
     monkeypatch.delenv("CLOAKBROWSER_AUTO_UPDATE", raising=False)
@@ -1389,6 +1436,99 @@ def test_session_manager_status_drops_stale_external_close_sessions(
     manager.close_all()
 
 
+def test_adapter_reuses_single_owner_for_loop_bound_context(plugin, monkeypatch, tmp_path):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = create_async_loop_bound_context
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    AsyncLoopBoundContext.created.clear()
+    AsyncLoopBoundContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    first = manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/one"}, task_id="owner-model"
+    )
+    second = manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/two"}, task_id="owner-model"
+    )
+
+    assert first["url"] == "https://example.test/one"
+    assert second["url"] == "https://example.test/two"
+    assert len(AsyncLoopBoundContext.created) == 1
+    manager.close_all()
+
+
+def test_adapter_shared_owner_close_all_cleans_up_initial_owner_thread(
+    plugin, monkeypatch, tmp_path
+):
+    baseline_threads = {
+        thread.ident
+        for thread in threading.enumerate()
+        if thread.name == "cloakbrowser-sdk-owner" and thread.is_alive()
+    }
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = create_async_loop_bound_context
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/one"}, task_id="owner-cleanup"
+    )
+    manager.close_all()
+
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        active_threads = {
+            thread.ident
+            for thread in threading.enumerate()
+            if thread.name == "cloakbrowser-sdk-owner" and thread.is_alive()
+        }
+        if active_threads == baseline_threads:
+            break
+        time.sleep(0.01)
+
+    assert {
+        thread.ident
+        for thread in threading.enumerate()
+        if thread.name == "cloakbrowser-sdk-owner" and thread.is_alive()
+    } == baseline_threads
+
+
+def test_adapter_call_recovers_after_external_context_close(plugin, monkeypatch, tmp_path):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    first = manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/one"}, task_id="recover-owner"
+    )
+    FakeBrowserContext.created[0].close()
+
+    second = manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/two"}, task_id="recover-owner"
+    )
+
+    assert first["url"] == "https://example.test/one"
+    assert second["url"] == "https://example.test/two"
+    assert len(FakeBrowserContext.created) == 2
+    assert manager.status()["connected"] is True
+    manager.close_all()
+
+
 def test_session_manager_races_single_context_for_same_profile(
     plugin, monkeypatch, tmp_path
 ):
@@ -1654,35 +1794,54 @@ def test_session_manager_same_session_concurrent_new_page_single_page(
     assert SlowNewPageContext.created[0].new_page_calls == 1
 
 
-def test_session_manager_process_registry_shares_context_across_managers(
+def test_session_manager_same_profile_managers_share_owner_runner_until_final_close(
     plugin, monkeypatch, tmp_path
 ):
     fake_sdk = types.ModuleType("cloakbrowser")
-    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    fake_sdk.create = create_async_loop_bound_context
     monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
-    FakeBrowserContext.created.clear()
-    FakeBrowserContext.closed.clear()
+    AsyncLoopBoundContext.created.clear()
+    AsyncLoopBoundContext.closed.clear()
     settings = plugin.config.load_config(
         FakeCtx({"user_data_dir": str(tmp_path / "profile")})
     ).settings
     first_manager = plugin.session_manager.SessionManager(settings)
     second_manager = plugin.session_manager.SessionManager(settings)
 
-    first_page = first_manager.page_for(task_id="task-a")
-    second_page = second_manager.page_for(task_id="task-b")
+    first = first_manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/one"}, task_id="task-a"
+    )
+    second = second_manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/two"}, task_id="task-b"
+    )
+    shared_context = second_manager._contexts[second_manager._context_key()]
+
     first_manager.close_all()
 
-    assert first_page is not second_page
-    assert len(FakeBrowserContext.created) == 1
-    assert len(FakeBrowserContext.created[0].pages) == 2
-    assert FakeBrowserContext.closed == []
+    third = second_manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/three"}, task_id="task-b"
+    )
+
+    assert first["url"] == "https://example.test/one"
+    assert second["url"] == "https://example.test/two"
+    assert third["url"] == "https://example.test/three"
+    assert first_manager._contexts == {}
+    assert second_manager._contexts[second_manager._context_key()] is shared_context
+    assert shared_context.owner is not None
+    assert len(AsyncLoopBoundContext.created) == 1
+    assert len(AsyncLoopBoundContext.created[0].pages) == 2
+    assert AsyncLoopBoundContext.closed == []
 
     second_manager.close_all()
 
-    assert FakeBrowserContext.closed == FakeBrowserContext.created
-    reacquired = first_manager.page_for(task_id="task-c")
-    assert reacquired is not first_page
-    assert len(FakeBrowserContext.created) == 2
+    assert AsyncLoopBoundContext.closed == AsyncLoopBoundContext.created
+
+    relaunched = first_manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/four"}, task_id="task-c"
+    )
+
+    assert relaunched["url"] == "https://example.test/four"
+    assert len(AsyncLoopBoundContext.created) == 2
     first_manager.close_all()
 
 

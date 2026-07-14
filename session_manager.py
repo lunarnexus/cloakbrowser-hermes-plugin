@@ -11,10 +11,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .adapter import CloakBrowserAdapter
+    from .adapter import CloakBrowserAdapter, _OwnerThreadRunner
     from .config import CloakConfig
 except ImportError:
-    from adapter import CloakBrowserAdapter  # type: ignore[no-redef]
+    from adapter import CloakBrowserAdapter, _OwnerThreadRunner  # type: ignore[no-redef]
     from config import CloakConfig  # type: ignore[no-redef]
 
 MAX_CONSOLE_MESSAGES = 200
@@ -33,6 +33,7 @@ class BrowserSession:
 @dataclass
 class SharedBrowserContext:
     context: Any | None
+    owner: _OwnerThreadRunner | None = None
     initial_page_claimed: bool = False
     ref_count: int = 0
     creating: bool = False
@@ -194,9 +195,11 @@ class SessionManager:
                 _CONTEXT_REGISTRY_CONDITION.wait()
 
         if create_owner:
+            owner = _OwnerThreadRunner()
             try:
-                context = self.adapter.create_context()
+                context = self.adapter.create_context(owner=owner)
             except Exception:
+                owner.close()
                 with _CONTEXT_REGISTRY_CONDITION:
                     if _CONTEXT_REGISTRY.get(context_key) is shared:
                         _CONTEXT_REGISTRY.pop(context_key, None)
@@ -205,6 +208,7 @@ class SessionManager:
                 raise
             with _CONTEXT_REGISTRY_CONDITION:
                 shared.context = context
+                shared.owner = owner
                 shared.creating = False
                 shared.ref_count += 1
                 self._contexts[context_key] = shared
@@ -274,6 +278,7 @@ class SessionManager:
     def close_all(self) -> None:
         self.cleanup_screenshot_temp_dirs(include_active=True)
         contexts_to_close: list[tuple[str, SharedBrowserContext]] = []
+        owners_to_close: list[_OwnerThreadRunner] = []
         with _CONTEXT_REGISTRY_CONDITION:
             if self._closing:
                 while self._closing:
@@ -305,15 +310,21 @@ class SessionManager:
             try:
                 close = getattr(shared.context, "close", None)
                 if callable(close):
-                    self.adapter.run(close())
+                    close()
             except Exception:
                 pass
             finally:
+                owner = shared.owner
+                shared.owner = None
                 with _CONTEXT_REGISTRY_CONDITION:
                     if _CONTEXT_REGISTRY.get(context_key) is shared:
                         _CONTEXT_REGISTRY.pop(context_key, None)
                     shared.closing = False
                     _CONTEXT_REGISTRY_CONDITION.notify_all()
+                if owner is not None:
+                    owners_to_close.append(owner)
+        for owner in owners_to_close:
+            owner.close()
         with _CONTEXT_REGISTRY_CONDITION:
             self._closing = False
             _CONTEXT_REGISTRY_CONDITION.notify_all()
@@ -404,6 +415,10 @@ class SessionManager:
         shared = shared or self._contexts.get(context_key) or _CONTEXT_REGISTRY.get(context_key)
         if shared is None or shared.creating or shared.closing or self._shared_context_is_live(shared):
             return
+        owner = shared.owner
+        shared.owner = None
         self._contexts.pop(context_key, None)
         if _CONTEXT_REGISTRY.get(context_key) is shared:
             _CONTEXT_REGISTRY.pop(context_key, None)
+        if owner is not None:
+            owner.close()
