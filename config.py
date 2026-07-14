@@ -54,7 +54,7 @@ class ConfigResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _ctx_config(ctx: Any) -> dict[str, Any]:
+def _ctx_config(ctx: Any, errors: list[str]) -> dict[str, Any]:
     for attr in ("config", "plugin_config"):
         value = getattr(ctx, attr, None)
         if isinstance(value, dict):
@@ -66,12 +66,24 @@ def _ctx_config(ctx: Any) -> dict[str, Any]:
             return value
     try:
         load_hermes_config = import_module("hermes_cli.config").load_config
+    except ModuleNotFoundError as exc:
+        if exc.name == "hermes_cli" or exc.name == "hermes_cli.config":
+            return {}
+        errors.append(f"failed to import Hermes config loader: {exc}")
+        return {}
+    except Exception as exc:
+        errors.append(f"failed to import Hermes config loader: {exc}")
+        return {}
+
+    try:
         value = load_hermes_config()
-        if isinstance(value, dict):
-            return value
-    except Exception:
-        pass
-    return {}
+    except Exception as exc:
+        errors.append(f"failed to load Hermes config: {exc}")
+        return {}
+    if not isinstance(value, dict):
+        errors.append("Hermes config loader returned non-dict config")
+        return {}
+    return value
 
 
 def _runtime_config(raw: dict[str, Any]) -> dict[str, Any]:
@@ -208,8 +220,8 @@ def _validate_user_data_dir(raw_value: Any, errors: list[str]) -> str:
 
 
 def load_config(ctx: Any) -> ConfigResult:
-    raw = _runtime_config(_ctx_config(ctx))
     errors: list[str] = []
+    raw = _runtime_config(_ctx_config(ctx, errors))
     warnings: list[str] = []
 
     preset = str(raw.get("human_preset", "default"))

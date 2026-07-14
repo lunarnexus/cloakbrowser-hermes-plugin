@@ -73,7 +73,8 @@ class RuntimeCtx:
 def _install_hermes_config_loader(monkeypatch, runtime_config):
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_config = types.ModuleType("hermes_cli.config")
-    setattr(hermes_config, "load_config", lambda: runtime_config)
+    load_config = runtime_config if callable(runtime_config) else lambda: runtime_config
+    setattr(hermes_config, "load_config", load_config)
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
 
@@ -158,6 +159,37 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
     assert parsed.settings.auto_update is False
     assert "allow_tool_override" not in parsed.settings.to_sdk_options()
     assert "geoip requires proxy" in "; ".join(parsed.warnings)
+
+
+def test_runtime_hermes_config_loader_exception_fails_closed(plugin, monkeypatch):
+    def broken_loader():
+        raise RuntimeError("boom")
+
+    _install_hermes_config_loader(monkeypatch, broken_loader)
+
+    parsed = plugin.config.load_config(RuntimeCtx())
+
+    assert parsed.valid is False
+    assert any("failed to load Hermes config: boom" in error for error in parsed.errors)
+
+
+def test_runtime_hermes_config_loader_non_dict_fails_closed(plugin, monkeypatch):
+    _install_hermes_config_loader(monkeypatch, ["not", "a", "dict"])
+
+    parsed = plugin.config.load_config(RuntimeCtx())
+
+    assert parsed.valid is False
+    assert any("non-dict config" in error for error in parsed.errors)
+
+
+def test_missing_hermes_config_loader_allows_standalone_defaults(plugin, monkeypatch):
+    monkeypatch.delitem(sys.modules, "hermes_cli", raising=False)
+    monkeypatch.delitem(sys.modules, "hermes_cli.config", raising=False)
+
+    parsed = plugin.config.load_config(RuntimeCtx())
+
+    assert parsed.valid is True
+    assert parsed.errors == []
 
 
 def test_invalid_human_preset_fails_clearly(plugin):
