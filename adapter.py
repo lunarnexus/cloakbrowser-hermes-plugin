@@ -187,6 +187,10 @@ class CloakBrowserAdapter:
         self._assert_safe_page_url(getattr(page, "url", None))
         ref_map: dict[str, Any] = {}
         text = self._snapshot_text(snapshot, ref_map=ref_map)
+        if source == "dom-text-fallback" and not ref_map:
+            ref_map = self._dom_fallback_ref_map(page)
+            if ref_map:
+                text = self._merge_dom_fallback_snapshot_text(page, text, ref_map)
         setattr(page, "_cloak_ref_map", ref_map)
         result = {
             "success": True,
@@ -225,6 +229,28 @@ class CloakBrowserAdapter:
                     lines.append(text)
             return "\n".join(lines)
         return json.dumps(snapshot, ensure_ascii=False)
+
+    def _merge_dom_fallback_snapshot_text(
+        self, page: Any, text: str, ref_map: dict[str, Any]
+    ) -> str:
+        metadata = getattr(page, "_cloak_ref_metadata", {}) or {}
+        lines = [text.strip()] if text and text.strip() else []
+        interactive_lines: list[str] = []
+        for ref in sorted(ref_map, key=lambda item: self._annotation_badge_number(item, 0)):
+            label = ""
+            if isinstance(metadata, dict) and isinstance(metadata.get(ref), dict):
+                role = str(metadata[ref].get("role") or "").strip()
+                name = str(metadata[ref].get("text") or "").strip()
+                label = " ".join(part for part in (role, name) if part).strip()
+            if not label:
+                label = "interactive element"
+            interactive_lines.append(f"[{ref}] {label}")
+        if interactive_lines:
+            if lines:
+                lines.append("")
+            lines.append("Interactive elements:")
+            lines.extend(interactive_lines)
+        return "\n".join(lines)
 
     def _click(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
         locator = self._locator(page, self._selector(args))

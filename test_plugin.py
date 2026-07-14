@@ -980,6 +980,43 @@ def test_browser_snapshot_default_uses_compact_accessibility_snapshot(plugin, mo
     assert page.accessibility.calls[-1] is True
 
 
+def test_browser_snapshot_dom_fallback_derives_refs_and_interactive_section(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="snapshot-dom")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.accessibility = None
+
+    result = json.loads(handlers["browser_snapshot"]({}, task_id="snapshot-dom"))
+
+    assert result["success"] is True
+    assert result["source"] == "dom-text-fallback"
+    assert result["refs"] == ["@e1", "@e2"]
+    assert result["element_count"] == 2
+    assert "Interactive elements:" in result["snapshot"]
+    assert "[@e1] button DOM Go" in result["snapshot"]
+    assert "[@e2] input" in result["snapshot"]
+    assert page._cloak_ref_map == {"@e1": "#dom-go", "@e2": "#dom-input"}
+
+
+def test_browser_snapshot_dom_fallback_refs_support_click_and_type(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="snapshot-dom-actions")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.accessibility = None
+
+    snapshot = json.loads(handlers["browser_snapshot"]({}, task_id="snapshot-dom-actions"))
+    clicked = json.loads(handlers["browser_click"]({"ref": "@e1"}, task_id="snapshot-dom-actions"))
+    typed = json.loads(
+        handlers["browser_type"]({"ref": "@e2", "text": "abc"}, task_id="snapshot-dom-actions")
+    )
+
+    assert snapshot["refs"] == ["@e1", "@e2"]
+    assert clicked["clicked"] is True
+    assert typed["typed"] is True
+    assert ("click", "#dom-go") in page.events
+    assert ("fill", "#dom-input", "abc") in page.events
+
+
 def test_browser_dialog_captures_bounded_dialogs_and_actions(plugin, monkeypatch, tmp_path):
     handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
     handlers["browser_navigate"]({"url": "https://example.test"}, task_id="dialog-task")
