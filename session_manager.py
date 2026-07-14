@@ -131,29 +131,39 @@ class SessionManager:
                 _CONTEXT_REGISTRY_CONDITION.wait()
 
         try:
-            shared = self._acquire_shared_context(context_key)
-            context = shared.context
-            if context is None:  # pragma: no cover - guarded by acquire path
-                raise RuntimeError("CloakBrowser context creation did not publish a context")
+            for attempt in range(2):
+                shared = self._acquire_shared_context(context_key)
+                context = shared.context
+                if context is None:  # pragma: no cover - guarded by acquire path
+                    raise RuntimeError("CloakBrowser context creation did not publish a context")
 
-            claim_initial_page = False
-            with _CONTEXT_REGISTRY_CONDITION:
-                if not shared.initial_page_claimed:
-                    shared.initial_page_claimed = True
-                    claim_initial_page = True
+                claim_initial_page = False
+                with _CONTEXT_REGISTRY_CONDITION:
+                    if not shared.initial_page_claimed:
+                        shared.initial_page_claimed = True
+                        claim_initial_page = True
 
-            pages = list(getattr(context, "pages", []) or []) if claim_initial_page else []
-            page = pages[0] if pages else context.new_page()
-            self._attach_console_capture(page)
-            self._attach_dialog_capture(page)
-            session = BrowserSession(context=context, page=page)
+                pages = list(getattr(context, "pages", []) or []) if claim_initial_page else []
+                try:
+                    page = pages[0] if pages else context.new_page()
+                except Exception as exc:
+                    if not pages and attempt == 0 and self._is_closed_target_error(exc):
+                        with _CONTEXT_REGISTRY_CONDITION:
+                            self._drop_shared_context_for_context_locked(
+                                context_key, context=context, shared=shared
+                            )
+                        continue
+                    raise
+                self._attach_console_capture(page)
+                self._attach_dialog_capture(page)
+                session = BrowserSession(context=context, page=page)
 
-            with _CONTEXT_REGISTRY_CONDITION:
-                existing = self._sessions.get(key)
-                if existing is None:
-                    self._sessions[key] = session
-                    return page
-                return existing.page
+                with _CONTEXT_REGISTRY_CONDITION:
+                    existing = self._sessions.get(key)
+                    if existing is None:
+                        self._sessions[key] = session
+                        return page
+                    return existing.page
         finally:
             with _CONTEXT_REGISTRY_CONDITION:
                 self._creating_sessions.discard(key)
@@ -401,6 +411,12 @@ class SessionManager:
                 return not value
         return True
 
+    def _is_closed_target_error(self, exc: BaseException) -> bool:
+        message = str(exc).strip().lower()
+        return message == "target page, context or browser has been closed" or message.endswith(
+            ": target page, context or browser has been closed"
+        )
+
     def _drop_session_locked(self, key: str, session: BrowserSession | None = None) -> None:
         current = self._sessions.get(key)
         if current is None:
@@ -419,6 +435,24 @@ class SessionManager:
         shared.owner = None
         self._contexts.pop(context_key, None)
         if _CONTEXT_REGISTRY.get(context_key) is shared:
+            _CONTEXT_REGISTRY.pop(context_key, None)
+        if owner is not None:
+            owner.close()
+
+    def _drop_shared_context_for_context_locked(
+        self,
+        context_key: str,
+        *,
+        context: Any,
+        shared: SharedBrowserContext | None = None,
+    ) -> None:
+        candidate = shared or self._contexts.get(context_key) or _CONTEXT_REGISTRY.get(context_key)
+        if candidate is None or candidate.context is not context:
+            return
+        owner = candidate.owner
+        candidate.owner = None
+        self._contexts.pop(context_key, None)
+        if _CONTEXT_REGISTRY.get(context_key) is candidate:
             _CONTEXT_REGISTRY.pop(context_key, None)
         if owner is not None:
             owner.close()

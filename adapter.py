@@ -276,10 +276,6 @@ class CloakBrowserAdapter:
         if self.manager is None:
             return {"error": "adapter has no session manager", "tool": tool_name}
         try:
-            page = self.manager.page_for(
-                task_id=kwargs.get("task_id"), session_id=kwargs.get("session_id")
-            )
-            self._adopt_owner(self._shared_owner_from_manager())
             handlers = {
                 "browser_navigate": self._navigate,
                 "browser_snapshot": self._snapshot,
@@ -296,9 +292,36 @@ class CloakBrowserAdapter:
             handler = handlers.get(tool_name)
             if handler is None:
                 return {"error": "unsupported browser tool", "tool": tool_name}
-            return self._redact_value(handler(page, args or {}))
+            task_id = kwargs.get("task_id")
+            session_id = kwargs.get("session_id")
+            page = self.manager.page_for(task_id=task_id, session_id=session_id)
+            self._adopt_owner(self._shared_owner_from_manager())
+            try:
+                result = handler(page, args or {})
+            except Exception as exc:
+                if not self._is_closed_target_error(exc):
+                    raise
+                self._evict_stale_cached_browser_state(task_id=task_id, session_id=session_id)
+                page = self.manager.page_for(task_id=task_id, session_id=session_id)
+                self._adopt_owner(self._shared_owner_from_manager())
+                result = handler(page, args or {})
+            return self._redact_value(result)
         except Exception as exc:
             return {"error": self._redact_text(str(exc), limit=1000), "tool": tool_name}
+
+    def _is_closed_target_error(self, exc: Exception) -> bool:
+        return "target page, context or browser has been closed" in str(exc).lower()
+
+    def _evict_stale_cached_browser_state(
+        self, *, task_id: str | None = None, session_id: str | None = None
+    ) -> None:
+        if self.manager is None:
+            return
+        session_key = getattr(self.manager, "_session_key", None)
+        sessions = getattr(self.manager, "_sessions", None)
+        if not callable(session_key) or not isinstance(sessions, dict):
+            return
+        sessions.pop(session_key(task_id=task_id, session_id=session_id), None)
 
     def _navigate(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
         url = args.get("url")

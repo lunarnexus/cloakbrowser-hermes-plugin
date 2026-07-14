@@ -1529,6 +1529,268 @@ def test_adapter_call_recovers_after_external_context_close(plugin, monkeypatch,
     manager.close_all()
 
 
+def test_adapter_call_recovers_when_cached_page_looks_live_but_goto_fails_closed(
+    plugin, monkeypatch, tmp_path
+):
+    class StaleButLivePage(FakePage):
+        def goto(self, url, wait_until="load"):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    class StaleButLiveContext(FakeBrowserContext):
+        created = []
+        closed = []
+
+        def __init__(self, **options):
+            super().__init__(**options)
+            self.pages = [StaleButLivePage()]
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    create_calls = []
+
+    def create(**options):
+        create_calls.append(options)
+        if len(create_calls) == 1:
+            return StaleButLiveContext(**options)
+        return FakeBrowserContext(**options)
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    StaleButLiveContext.created.clear()
+    StaleButLiveContext.closed.clear()
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    result = manager.adapter.call(
+        "browser_navigate",
+        {"url": "https://example.test/recovered"},
+        task_id="stale-page",
+    )
+
+    assert result["success"] is True
+    assert result["url"] == "https://example.test/recovered"
+    assert len(create_calls) == 1
+    manager.close_all()
+
+
+def test_adapter_call_cached_page_stale_recovery_preserves_live_shared_context_for_siblings(
+    plugin, monkeypatch, tmp_path
+):
+    class FlakyCachedPage(FakePage):
+        def __init__(self):
+            super().__init__()
+            self.fail_closed_once = False
+
+        def goto(self, url, wait_until="load"):
+            if self.fail_closed_once:
+                self.fail_closed_once = False
+                raise RuntimeError("Target page, context or browser has been closed")
+            return super().goto(url, wait_until=wait_until)
+
+    class SharedContext(FakeBrowserContext):
+        created = []
+        closed = []
+
+        def __init__(self, **options):
+            super().__init__(**options)
+            self.pages = [FlakyCachedPage()]
+
+        def new_page(self):
+            page = FlakyCachedPage()
+            self.pages.append(page)
+            return page
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    create_calls = []
+
+    def create(**options):
+        create_calls.append(options)
+        return SharedContext(**options)
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    SharedContext.created.clear()
+    SharedContext.closed.clear()
+    settings = plugin.config.load_config(
+        FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    ).settings
+    first_manager = plugin.session_manager.SessionManager(settings)
+    second_manager = plugin.session_manager.SessionManager(settings)
+
+    first = first_manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/one"}, task_id="task-a"
+    )
+    second = second_manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/two"}, task_id="task-b"
+    )
+    shared_context = second_manager._contexts[second_manager._context_key()]
+    sibling_page = second_manager._sessions[second_manager._session_key(task_id="task-b")].page
+    stale_page = first_manager._sessions[first_manager._session_key(task_id="task-a")].page
+    stale_page.fail_closed_once = True
+
+    recovered = first_manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/recovered"}, task_id="task-a"
+    )
+    sibling_after = second_manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/still-live"}, task_id="task-b"
+    )
+
+    assert first["url"] == "https://example.test/one"
+    assert second["url"] == "https://example.test/two"
+    assert recovered["url"] == "https://example.test/recovered"
+    assert sibling_after["url"] == "https://example.test/still-live"
+    assert len(create_calls) == 1
+    assert SharedContext.closed == []
+    assert second_manager._contexts[second_manager._context_key()] is shared_context
+    assert second_manager._sessions[second_manager._session_key(task_id="task-b")].page is sibling_page
+
+    second_manager.close_all()
+    first_manager.close_all()
+
+
+def test_adapter_call_stale_page_retry_happens_only_once_and_surfaces_second_error(
+    plugin, monkeypatch, tmp_path
+):
+    class ClosedTargetPage(FakePage):
+        def goto(self, url, wait_until="load"):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    class SecondAttemptPage(FakePage):
+        def goto(self, url, wait_until="load"):
+            raise RuntimeError("second attempt boom")
+
+    class RetryOnceContext(FakeBrowserContext):
+        created = []
+        closed = []
+
+        def __init__(self, **options):
+            super().__init__(**options)
+            self.pages: list[FakePage] = [ClosedTargetPage()]
+            self.new_page_calls = 0
+
+        def new_page(self):
+            self.new_page_calls += 1
+            page = SecondAttemptPage()
+            self.pages.append(page)
+            return page
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    create_calls = []
+
+    def create(**options):
+        create_calls.append(options)
+        return RetryOnceContext(**options)
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    RetryOnceContext.created.clear()
+    RetryOnceContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    result = manager.adapter.call(
+        "browser_navigate",
+        {"url": "https://example.test/retry-once"},
+        task_id="retry-once",
+    )
+
+    assert result["tool"] == "browser_navigate"
+    assert "second attempt boom" in result["error"]
+    assert len(create_calls) == 1
+    assert RetryOnceContext.created[0].new_page_calls == 1
+    manager.close_all()
+
+
+def test_adapter_call_recovers_when_shared_context_looks_live_but_new_page_fails_closed(
+    plugin, monkeypatch, tmp_path
+):
+    class StaleButLiveContext(FakeBrowserContext):
+        created = []
+        closed = []
+
+        def new_page(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    create_calls = []
+
+    def create(**options):
+        create_calls.append(options)
+        if len(create_calls) == 1:
+            return StaleButLiveContext(**options)
+        return FakeBrowserContext(**options)
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    StaleButLiveContext.created.clear()
+    StaleButLiveContext.closed.clear()
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    first = manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/one"}, task_id="task-one"
+    )
+    second = manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/two"}, task_id="task-two"
+    )
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert second["url"] == "https://example.test/two"
+    assert len(create_calls) == 2
+    manager.close_all()
+
+
+def test_status_does_not_relaunch_browser_when_stale_context_is_only_checked(
+    plugin, monkeypatch, tmp_path
+):
+    class StaleButLiveContext(FakeBrowserContext):
+        created = []
+        closed = []
+
+        def new_page(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    fake_sdk = types.ModuleType("cloakbrowser")
+    create_calls = []
+
+    def create(**options):
+        create_calls.append(options)
+        return StaleButLiveContext(**options)
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    StaleButLiveContext.created.clear()
+    StaleButLiveContext.closed.clear()
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    first = manager.adapter.call(
+        "browser_navigate", {"url": "https://example.test/one"}, task_id="task-one"
+    )
+    status = manager.status()
+
+    assert first["success"] is True
+    assert status["connected"] is True
+    assert len(create_calls) == 1
+    manager.close_all()
+
+
 def test_session_manager_races_single_context_for_same_profile(
     plugin, monkeypatch, tmp_path
 ):
