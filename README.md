@@ -20,41 +20,27 @@ Current foundation behavior:
 
 ## Install
 
-Use the official Hermes plugin workflow:
+Use the official Hermes plugin workflow. `hermes plugins install` accepts a Git URL or GitHub `owner/repo` shorthand.
 
 ```bash
 hermes plugins install https://github.com/<owner>/cloakbrowser-hermes-plugin.git --enable
 hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
-Or, after the repository is published under GitHub shorthand:
+Or:
 
 ```bash
 hermes plugins install <owner>/cloakbrowser-hermes-plugin --enable
 hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
-Start a new Hermes session after enabling the plugin.
-
-## Local development install
-
-For a workspace checkout, use a supported local file URL or link the plugin into the profile plugin directory:
+Update an installed plugin with:
 
 ```bash
-hermes plugins install file:///absolute/path/to/cloakbrowser-hermes-plugin --enable
-hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
+hermes plugins update cloakbrowser-hermes-plugin
 ```
 
-If your Hermes version does not support local path installs, place the checkout under the active profile plugin directory and enable it:
-
-```bash
-mkdir -p ~/.hermes/profiles/<profile>/plugins
-ln -sfn /absolute/path/to/cloakbrowser-hermes-plugin \
-  ~/.hermes/profiles/<profile>/plugins/cloakbrowser-hermes-plugin
-hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
-```
-
-Replace `<profile>` with the Hermes profile you intend to use. Plugin changes take effect in a new session.
+Start a new Hermes session after install or update.
 
 ## Configuration
 
@@ -86,13 +72,13 @@ plugins:
         auto_update: null
 ```
 
-Install the CloakBrowser SDK into the Hermes virtualenv used by the target profile:
+Install the CloakBrowser SDK into the Hermes runtime environment used by the target profile:
 
 ```bash
 ~/.local/share/uv/tools/hermes-agent/bin/python -m pip install cloakbrowser
 ```
 
-If your Hermes install uses a different venv, run `python -m pip install cloakbrowser` with that Hermes venv's Python.
+If your Hermes install uses a different venv, run `python -m pip install cloakbrowser` with that Hermes runtime's Python.
 
 `auto_acknowledge_banner` writes a fresh integer Unix timestamp to CloakBrowser's `.welcome_shown` marker in `cloakbrowser.download.get_cache_dir()` before SDK launch. Marker write failures are ignored so launch is not blocked.
 
@@ -110,6 +96,8 @@ Slash commands in this foundation slice:
 ```
 
 `/cloak status` reports readiness and high-level state only. It does not print profile paths, session IDs, cookies, or URLs.
+
+Use `/cloak status` as runtime verification that the plugin loaded in the active Hermes session. It is not a substitute for a real headed desktop smoke test when `headless: false` is part of the target deployment.
 
 When enabled and ready, the plugin registers these built-in browser tool overrides:
 

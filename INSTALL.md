@@ -8,22 +8,15 @@ This installs the Hermes plugin only. It does not configure any external browser
 
 Install the `cloakbrowser` Python package into the same Python environment that runs Hermes. Use the package/source approved for your deployment.
 
-Example editable source install:
+Example install into the Hermes-managed runtime shown in this repo's docs:
 
 ```bash
-python3 -m pip install -e /absolute/path/to/cloakbrowser-sdk
+~/.local/share/uv/tools/hermes-agent/bin/python -m pip install cloakbrowser
 ```
 
-Verify importability from the Hermes runtime environment:
+If your Hermes install uses a different runtime, run `python -m pip install cloakbrowser` with that Hermes runtime's Python.
 
-```bash
-python3 - <<'PY'
-import importlib.util
-print(importlib.util.find_spec("cloakbrowser") is not None)
-PY
-```
-
-Expected output: `True`.
+Do not treat a generic `python3` import check as proof that Hermes can import the package. Runtime verification happens later from inside a fresh Hermes session.
 
 ## 2) Install the Hermes plugin
 
@@ -41,23 +34,13 @@ hermes plugins install <owner>/cloakbrowser-hermes-plugin --enable
 hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
 ```
 
-For local development from this checkout, use a supported local file URL:
+Update an installed plugin with:
 
 ```bash
-hermes plugins install file:///absolute/path/to/cloakbrowser-hermes-plugin --enable
-hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
+hermes plugins update cloakbrowser-hermes-plugin
 ```
 
-If local path installs are unavailable in your Hermes version, link the checkout into the active profile plugin directory:
-
-```bash
-mkdir -p ~/.hermes/profiles/<profile>/plugins
-ln -sfn /absolute/path/to/cloakbrowser-hermes-plugin \
-  ~/.hermes/profiles/<profile>/plugins/cloakbrowser-hermes-plugin
-hermes plugins enable cloakbrowser-hermes-plugin --allow-tool-override
-```
-
-Replace `<profile>` with the profile being tested. Start a new Hermes session after enabling.
+Start a new Hermes session after install or update.
 
 ## 3) Configure plugin options
 
@@ -112,6 +95,14 @@ Expected for this foundation slice:
 - Status does not expose profile paths, session IDs, cookies, or URLs.
 - If `cloakbrowser` is not importable, browser tool overrides are not registered.
 - If `cloakbrowser` is importable and config is valid, browser tool overrides register and route calls through the direct SDK context.
+
+This is runtime verification for active Hermes/mina session, not proof from arbitrary shell Python.
+
+For real mina verification, run the check inside target Hermes/mina runtime:
+- start fresh session for profile under test
+- run `/cloak status`
+- confirm plugin reports ready and browser overrides are registered
+- if deployment expects headed use (`headless: false`), run one real browser smoke in that same mina session
 
 ## Disable
 

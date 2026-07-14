@@ -1,5 +1,7 @@
 # CloakBrowser Hermes Plugin Rewrite Plan
 
+> Historical note: this file is the original rewrite plan. It is not the current remaining-work checklist. Current code and tests already cover the implemented browser override set, including `browser_navigate`, `browser_snapshot`, `browser_vision`, and slash-command parsing. Remaining cleanup is tracked in the workspace cleanup plan and is currently doc/install/runtime-smoke focused.
+
 ## Goal
 
 Rewrite `cloakbrowser-hermes-plugin` from an MCP-backed browser-tool override plugin into a standalone Hermes plugin that uses the Python `cloakbrowser` SDK directly, while preserving the existing Hermes `browser_*` tool contracts and avoiding Hermes core changes.
