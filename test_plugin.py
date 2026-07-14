@@ -580,6 +580,66 @@ class FakeBrowserContext:
         self.closed.append(self)
 
 
+def test_register_loads_runtime_config_from_hermes_config(plugin, monkeypatch, tmp_path):
+    FakeBrowserContext.created.clear()
+    profile = tmp_path / "runtime-profile"
+    runtime_config = {
+        "plugins": {
+            "entries": {
+                "cloakbrowser-hermes-plugin": {
+                    "allow_tool_override": True,
+                    "config": {
+                        "user_data_dir": str(profile),
+                        "headless": False,
+                        "args": ["--window-size=123,456"],
+                    },
+                }
+            }
+        }
+    }
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_config = types.ModuleType("hermes_cli.config")
+    setattr(hermes_config, "load_config", lambda: runtime_config)
+    fake_sdk = types.ModuleType("cloakbrowser")
+    setattr(fake_sdk, "create", lambda **options: FakeBrowserContext(**options))
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+
+    class RuntimeCtx:
+        def __init__(self):
+            self.registered_tools = []
+            self.registered_commands = []
+
+        def register_tool(self, **kwargs):
+            self.registered_tools.append(kwargs)
+
+        def register_command(self, name, handler, description="", args_hint=""):
+            self.registered_commands.append(
+                {
+                    "name": name,
+                    "handler": handler,
+                    "description": description,
+                    "args_hint": args_hint,
+                }
+            )
+
+    ctx = RuntimeCtx()
+
+    parsed = plugin.config.load_config(ctx)
+    plugin.register(ctx)
+    result = json.loads(
+        ctx.registered_tools[0]["handler"]({"url": "about:blank"}, task_id="runtime-config")
+    )
+
+    assert parsed.settings.headless is False
+    assert parsed.settings.user_data_dir == str(profile.resolve())
+    assert result["url"] == "about:blank"
+    assert FakeBrowserContext.created[-1].options["headless"] is False
+    assert FakeBrowserContext.created[-1].options["user_data_dir"] == str(profile.resolve())
+    assert FakeBrowserContext.created[-1].options["args"] == ["--window-size=123,456"]
+
+
 def _registered_browser_tools(plugin, monkeypatch, tmp_path):
     FakeBrowserContext.created.clear()
     FakeBrowserContext.closed.clear()

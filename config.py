@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,13 @@ def _ctx_config(ctx: Any) -> dict[str, Any]:
         value = getter()
         if isinstance(value, dict):
             return value
+    try:
+        load_hermes_config = import_module("hermes_cli.config").load_config
+        value = load_hermes_config()
+        if isinstance(value, dict):
+            return value
+    except Exception:
+        pass
     return {}
 
 
