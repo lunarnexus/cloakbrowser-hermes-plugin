@@ -62,6 +62,7 @@ plugins:
   entries:
     cloakbrowser-hermes-plugin:
       enabled: true
+      allow_tool_override: true
       config:
         user_data_dir: ~/.hermes/profiles/<profile>/browser-profiles/cloakbrowser
         headless: false
