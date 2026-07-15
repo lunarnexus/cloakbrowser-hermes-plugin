@@ -148,6 +148,7 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
                     "config": {
                         "user_data_dir": str(tmp_path / "profile"),
                         "headless": False,
+                        "chromium_sandbox": False,
                         "humanize": False,
                         "human_preset": "careful",
                         "stealth_args": False,
@@ -172,6 +173,7 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
     assert parsed.valid is True
     assert parsed.settings.user_data_dir == str((tmp_path / "profile").resolve())
     assert parsed.settings.headless is False
+    assert parsed.settings.chromium_sandbox is False
     assert parsed.settings.humanize is False
     assert parsed.settings.human_preset == "careful"
     assert parsed.settings.stealth_args is False
@@ -190,6 +192,7 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
         "--fingerprint=seed-123",
     ]
     assert parsed.settings.to_sdk_options()["viewport"] == {"width": 1440, "height": 900}
+    assert parsed.settings.to_sdk_options()["chromiumSandbox"] is False
     assert "allow_tool_override" not in parsed.settings.to_sdk_options()
     assert "geoip requires proxy" in "; ".join(parsed.warnings)
 
@@ -198,9 +201,11 @@ def test_config_omits_viewport_by_default_for_sdk_parity(plugin, tmp_path):
     parsed = plugin.config.load_config(FakeCtx({"user_data_dir": str(tmp_path / "profile")}))
 
     assert parsed.valid is True
+    assert parsed.settings.chromium_sandbox is True
     assert parsed.settings.viewport_width is None
     assert parsed.settings.viewport_height is None
     assert "viewport" not in parsed.settings.to_sdk_options()
+    assert parsed.settings.to_sdk_options()["chromiumSandbox"] is True
 
 
 def test_config_parses_stringified_empty_args_list(plugin, tmp_path):
@@ -939,6 +944,7 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
                     "config": {
                         "user_data_dir": str(profile),
                         "headless": False,
+                        "chromium_sandbox": False,
                         "humanize": False,
                         "stealth_args": False,
                         "fingerprint_seed": "runtime-seed",
@@ -968,6 +974,7 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
 
     assert parsed.valid is True
     assert parsed.settings.headless is False
+    assert parsed.settings.chromium_sandbox is False
     assert parsed.settings.humanize is False
     assert parsed.settings.stealth_args is False
     assert parsed.settings.fingerprint_seed == "runtime-seed"
@@ -977,6 +984,7 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
     assert parsed.settings.user_data_dir == str(profile.resolve())
     assert result["url"] == "about:blank"
     assert FakeBrowserContext.created[-1].options["headless"] is False
+    assert FakeBrowserContext.created[-1].options["chromiumSandbox"] is False
     assert FakeBrowserContext.created[-1].options["humanize"] is False
     assert FakeBrowserContext.created[-1].options["stealth_args"] is False
     assert FakeBrowserContext.created[-1].options["user_data_dir"] == str(profile.resolve())
