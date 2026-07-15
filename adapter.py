@@ -14,6 +14,7 @@ import socket
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -176,6 +177,56 @@ class _OwnerThreadRunner:
                 loop.close()
 
 
+def _run_detached(callable_or_value: Any) -> Any:
+    if not callable(callable_or_value) and not inspect.isawaitable(callable_or_value):
+        return callable_or_value
+
+    done = threading.Event()
+    result_box: list[Any] = [None]
+    error_box: list[BaseException | None] = [None]
+
+    def _worker() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            value = callable_or_value() if callable(callable_or_value) else callable_or_value
+            if inspect.isawaitable(value):
+                value = loop.run_until_complete(value)
+            result_box[0] = value
+        except BaseException as exc:  # pragma: no cover - surfaced to caller
+            error_box[0] = exc
+        finally:
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            finally:
+                loop.close()
+                done.set()
+
+    thread = threading.Thread(target=_worker, name="cloakbrowser-detached-async", daemon=True)
+    thread.start()
+    done.wait()
+    if error_box[0] is not None:
+        raise error_box[0]
+    return result_box[0]
+
+
+def _resolve_tool_call(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    if inspect.iscoroutinefunction(func):
+        value = func(*args, **kwargs)
+        try:
+            from model_tools import _run_async  # type: ignore
+        except Exception:
+            _run_async = None
+        if callable(_run_async):
+            return _run_async(value)
+        return _run_detached(value)
+    return _run_detached(lambda: func(*args, **kwargs))
+
+
 class _OwnedSDKProxy:
     def __init__(self, owner: _OwnerThreadRunner, target: Any):
         object.__setattr__(self, "_owner", owner)
@@ -243,8 +294,17 @@ class CloakBrowserAdapter:
 
     def __init__(self, settings: CloakConfig, manager: Any | None = None):
         self.settings = settings
+        self._manager_ref: weakref.ReferenceType[Any] | None = None
         self.manager = manager
         self._owner = _OwnerThreadRunner()
+
+    @property
+    def manager(self) -> Any | None:
+        return self._manager_ref() if self._manager_ref is not None else None
+
+    @manager.setter
+    def manager(self, value: Any | None) -> None:
+        self._manager_ref = weakref.ref(value) if value is not None else None
 
     def _adopt_owner(self, owner: _OwnerThreadRunner | None) -> _OwnerThreadRunner:
         if owner is not None and owner is not self._owner:
@@ -832,7 +892,7 @@ class CloakBrowserAdapter:
             meta["screenshot_path"] = str(path)
             return native_result
 
-        analysis = self.run(vision_analyze_tool(str(path), question))
+        analysis = _resolve_tool_call(vision_analyze_tool, str(path), question)
         if isinstance(analysis, str):
             parsed = json.loads(analysis)
             if isinstance(parsed, dict):

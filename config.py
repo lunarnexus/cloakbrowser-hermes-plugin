@@ -151,6 +151,15 @@ def _default_user_data_dir() -> str:
     return str((_hermes_home() / "browser-profiles" / "cloakbrowser").resolve())
 
 
+def _hermes_profiles_roots(hermes_home: Path, home: Path) -> list[Path]:
+    roots = [(home / ".hermes" / "profiles").resolve()]
+    if hermes_home.parent.name == "profiles":
+        inferred_root = hermes_home.parent.resolve()
+        if inferred_root not in roots:
+            roots.append(inferred_root)
+    return roots
+
+
 def _parse_bool(raw: Any, default: bool, name: str, errors: list[str]) -> bool:
     if raw is None:
         return default
@@ -234,8 +243,8 @@ def _validate_user_data_dir(raw_value: Any, errors: list[str]) -> str:
             "user_data_dir must not point at an existing browser profile directory"
         )
 
-    hermes_profiles = home / ".hermes" / "profiles"
-    if _is_relative_to(resolved, hermes_profiles.resolve()) and not any(
+    hermes_profiles_roots = _hermes_profiles_roots(hermes_home, home)
+    if any(_is_relative_to(resolved, root) for root in hermes_profiles_roots) and not any(
         resolved == allowed or _is_relative_to(resolved, allowed)
         for allowed in allowed_current_profile_roots
     ):

@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import threading
 import time
+import weakref
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +14,11 @@ from typing import Any
 try:
     from .adapter import CloakBrowserAdapter, _OwnerThreadRunner
     from .config import CloakConfig
+    from .preflight import detect_persistent_profile_collision
 except ImportError:
     from adapter import CloakBrowserAdapter, _OwnerThreadRunner  # type: ignore[no-redef]
     from config import CloakConfig  # type: ignore[no-redef]
+    from preflight import detect_persistent_profile_collision  # type: ignore[no-redef]
 
 MAX_CONSOLE_MESSAGES = 200
 MAX_DIALOGS = 20
@@ -43,20 +46,100 @@ class SharedBrowserContext:
 _CONTEXT_REGISTRY: dict[str, SharedBrowserContext] = {}
 _CONTEXT_REGISTRY_LOCK = threading.RLock()
 _CONTEXT_REGISTRY_CONDITION = threading.Condition(_CONTEXT_REGISTRY_LOCK)
+_LIVE_MANAGERS: weakref.WeakSet[SessionManager] = weakref.WeakSet()
+_ATEXIT_REGISTERED = False
+
+
+def _close_live_managers_at_exit() -> None:
+    for manager in list(_LIVE_MANAGERS):
+        try:
+            manager.close_all()
+        except Exception:
+            pass
+
+
+def _finalize_manager(
+    *,
+    contexts: dict[str, SharedBrowserContext],
+    sessions: dict[str, BrowserSession],
+    creating_sessions: set[str],
+    screenshot_temp_dirs: set[Path],
+) -> None:
+    candidates: set[Path] = set(screenshot_temp_dirs)
+    screenshot_temp_dirs.clear()
+    contexts_to_close: list[tuple[str, SharedBrowserContext]] = []
+    owners_to_close: list[_OwnerThreadRunner] = []
+
+    with _CONTEXT_REGISTRY_CONDITION:
+        while creating_sessions:
+            _CONTEXT_REGISTRY_CONDITION.wait(timeout=0.05)
+        for context_key, shared in list(contexts.items()):
+            shared.ref_count = max(0, shared.ref_count - 1)
+            if (
+                shared.ref_count == 0
+                and not shared.closing
+                and _CONTEXT_REGISTRY.get(context_key) is shared
+            ):
+                shared.closing = True
+                contexts_to_close.append((context_key, shared))
+        sessions.clear()
+        creating_sessions.clear()
+        contexts.clear()
+        _CONTEXT_REGISTRY_CONDITION.notify_all()
+
+    for context_key, shared in contexts_to_close:
+        try:
+            close = getattr(shared.context, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
+        finally:
+            owner = shared.owner
+            shared.owner = None
+            with _CONTEXT_REGISTRY_CONDITION:
+                if _CONTEXT_REGISTRY.get(context_key) is shared:
+                    _CONTEXT_REGISTRY.pop(context_key, None)
+                shared.closing = False
+                _CONTEXT_REGISTRY_CONDITION.notify_all()
+            if owner is not None:
+                owners_to_close.append(owner)
+
+    for owner in owners_to_close:
+        owner.close()
+
+    for path in candidates:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class SessionManager:
     def __init__(self, settings: CloakConfig):
+        global _ATEXIT_REGISTERED
         self.settings = settings
         self.adapter = CloakBrowserAdapter(settings, self)
         self._contexts: dict[str, SharedBrowserContext] = {}
         self._sessions: dict[str, BrowserSession] = {}
         self._screenshot_temp_dirs: set[Path] = set()
         self._creating_sessions: set[str] = set()
+        self._last_runtime_error: str | None = None
         self._closing = False
         self._closed = False
         self.cleanup_screenshot_temp_dirs(include_active=True)
-        atexit.register(self.close_all)
+        self._arm_finalizer()
+        _LIVE_MANAGERS.add(self)
+        if not _ATEXIT_REGISTERED:
+            atexit.register(_close_live_managers_at_exit)
+            _ATEXIT_REGISTERED = True
+
+    def _arm_finalizer(self) -> None:
+        self._finalizer = weakref.finalize(
+            self,
+            _finalize_manager,
+            contexts=self._contexts,
+            sessions=self._sessions,
+            creating_sessions=self._creating_sessions,
+            screenshot_temp_dirs=self._screenshot_temp_dirs,
+        )
 
     def new_screenshot_path(self) -> Path:
         temp_dir = Path(tempfile.mkdtemp(prefix=SCREENSHOT_TEMP_PREFIX))
@@ -99,6 +182,18 @@ class SessionManager:
 
     def _context_key(self) -> str:
         return str(Path(self.settings.user_data_dir).expanduser().resolve())
+
+    def _set_runtime_error(self, message: str | None) -> None:
+        with _CONTEXT_REGISTRY_CONDITION:
+            self._last_runtime_error = message or None
+
+    def _translate_runtime_error(self, exc: BaseException) -> BaseException:
+        collision = detect_persistent_profile_collision(exc)
+        if collision is not None:
+            self._set_runtime_error(collision)
+            return RuntimeError(collision)
+        self._set_runtime_error(str(exc).strip() or type(exc).__name__)
+        return exc
 
     def _session_key(
         self, *, task_id: str | None = None, session_id: str | None = None
@@ -162,7 +257,9 @@ class SessionManager:
                     existing = self._sessions.get(key)
                     if existing is None:
                         self._sessions[key] = session
+                        self._last_runtime_error = None
                         return page
+                    self._last_runtime_error = None
                     return existing.page
         finally:
             with _CONTEXT_REGISTRY_CONDITION:
@@ -208,14 +305,15 @@ class SessionManager:
             owner = _OwnerThreadRunner()
             try:
                 context = self.adapter.create_context(owner=owner)
-            except Exception:
+            except Exception as exc:
                 owner.close()
+                translated = self._translate_runtime_error(exc)
                 with _CONTEXT_REGISTRY_CONDITION:
                     if _CONTEXT_REGISTRY.get(context_key) is shared:
                         _CONTEXT_REGISTRY.pop(context_key, None)
                     shared.creating = False
                     _CONTEXT_REGISTRY_CONDITION.notify_all()
-                raise
+                raise translated
             with _CONTEXT_REGISTRY_CONDITION:
                 shared.context = context
                 shared.owner = owner
@@ -234,11 +332,10 @@ class SessionManager:
         on = getattr(page, "on", None)
         if not callable(on):
             return
+        redact_text = self.adapter._redact_text
 
         def append_message(msg_type: str, text: str) -> None:
-            messages.append(
-                {"type": msg_type, "text": self.adapter._redact_text(text, limit=4000)}
-            )
+            messages.append({"type": msg_type, "text": redact_text(text, limit=4000)})
 
         def capture(message: Any) -> None:
             msg_type = getattr(message, "type", None)
@@ -262,6 +359,7 @@ class SessionManager:
         on = getattr(page, "on", None)
         if not callable(on):
             return
+        redact_text = self.adapter._redact_text
 
         def attr(dialog: Any, name: str, default: str = "") -> str:
             value = getattr(dialog, name, default)
@@ -270,7 +368,7 @@ class SessionManager:
             return str(value or default)
 
         def scrub(value: str, limit: int) -> str:
-            redacted = self.adapter._redact_text(value, limit=limit)
+            redacted = redact_text(value, limit=limit)
             return "[REDACTED]" if "[REDACTED]" in redacted else redacted
 
         def capture(dialog: Any) -> None:
@@ -286,6 +384,8 @@ class SessionManager:
         on("dialog", capture)
 
     def close_all(self) -> None:
+        self._finalizer.detach()
+        self._arm_finalizer()
         self.cleanup_screenshot_temp_dirs(include_active=True)
         contexts_to_close: list[tuple[str, SharedBrowserContext]] = []
         owners_to_close: list[_OwnerThreadRunner] = []
@@ -352,6 +452,7 @@ class SessionManager:
             "profile_configured": bool(self.settings.user_data_dir),
             "mode": "direct-sdk",
             "sessions": len(self._sessions),
+            "errors": [self._last_runtime_error] if self._last_runtime_error else [],
         }
 
     def _session_is_live(self, session: BrowserSession) -> bool:

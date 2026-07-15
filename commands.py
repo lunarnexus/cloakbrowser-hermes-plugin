@@ -37,6 +37,9 @@ def handle_slash(
     if manager is not None:
         status = manager.status()
         lines.extend([f"connected: {status['connected']}", f"mode: {status['mode']}"])
+        runtime_errors = status.get("errors")
+        if isinstance(runtime_errors, list) and runtime_errors:
+            lines.append("errors: " + "; ".join(str(item) for item in runtime_errors))
     if preflight.errors:
         lines.append("errors: " + "; ".join(preflight.errors))
     if preflight.warnings:

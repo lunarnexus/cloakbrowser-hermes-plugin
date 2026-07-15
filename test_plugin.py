@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import asyncio
+import gc
 import json
+import warnings
 import os
 import sys
 import tempfile
@@ -299,6 +301,50 @@ def test_missing_hermes_config_loader_allows_standalone_defaults(plugin, monkeyp
 
     assert parsed.valid is True
     assert parsed.errors == []
+
+
+@pytest.mark.parametrize(
+    "active_profile, foreign_profile",
+    [("mina", "sera"), ("sera", "mina")],
+)
+def test_runtime_loader_rejects_other_profile_user_data_dir(plugin, monkeypatch, tmp_path, active_profile, foreign_profile):
+    hermes_root = tmp_path / ".hermes"
+    active_home = hermes_root / "profiles" / active_profile
+    foreign_user_data_dir = (
+        hermes_root / "profiles" / foreign_profile / "browser-profiles" / "cloakbrowser"
+    )
+    monkeypatch.setattr(plugin.config, "_hermes_home", lambda: active_home.resolve())
+    _install_hermes_config_loader(
+        monkeypatch,
+        {
+            "plugins": {
+                "entries": {
+                    "cloakbrowser-hermes-plugin": {
+                        "config": {"user_data_dir": str(foreign_user_data_dir)}
+                    }
+                }
+            }
+        },
+    )
+
+    parsed = plugin.config.load_config(RuntimeCtx())
+
+    assert parsed.valid is False
+    assert any("another Hermes profile" in error for error in parsed.errors)
+
+
+@pytest.mark.parametrize("active_profile", ["mina", "sera"])
+def test_runtime_loader_default_user_data_dir_stays_under_active_profile(plugin, monkeypatch, tmp_path, active_profile):
+    active_home = tmp_path / ".hermes" / "profiles" / active_profile
+    monkeypatch.setattr(plugin.config, "_hermes_home", lambda: active_home.resolve())
+    _install_hermes_config_loader(monkeypatch, {"plugins": {"entries": {}}})
+
+    parsed = plugin.config.load_config(RuntimeCtx())
+
+    assert parsed.valid is True
+    assert parsed.settings.user_data_dir == str(
+        (active_home / "browser-profiles" / "cloakbrowser").resolve()
+    )
 
 
 def test_invalid_human_preset_fails_clearly(plugin):
@@ -1441,6 +1487,115 @@ def test_browser_vision_screenshots_to_safe_temp_file_and_redacts(plugin, monkey
     assert "token=secret" not in json.dumps(result)
 
 
+def test_browser_vision_uses_hermes_run_async_bridge_in_runtime_shape(
+    plugin, monkeypatch, tmp_path
+):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="vision-runtime")
+
+    async def _analyze(image_url: str, user_prompt: str, model=None, task_id=None):
+        await asyncio.sleep(0)
+        return json.dumps({"success": True, "analysis": f"runtime:{user_prompt}", "image_url": image_url})
+
+    bridge_calls: list[str] = []
+
+    def fake_run_async(coro):
+        bridge_calls.append(type(coro).__name__)
+        result_box: dict[str, str] = {}
+        error_box: dict[str, BaseException] = {}
+        done = threading.Event()
+
+        def _worker() -> None:
+            try:
+                result_box["value"] = asyncio.run(coro)
+            except BaseException as exc:  # pragma: no cover - surfaced by test
+                error_box["exc"] = exc
+            finally:
+                done.set()
+
+        threading.Thread(target=_worker, daemon=True).start()
+        assert done.wait(timeout=5)
+        if "exc" in error_box:
+            raise error_box["exc"]
+        return result_box["value"]
+
+    monkeypatch.setattr(sys.modules["tools.vision_tools"], "vision_analyze_tool", _analyze)
+    monkeypatch.setitem(sys.modules, "model_tools", types.SimpleNamespace(_run_async=fake_run_async))
+
+    async def invoke_from_running_loop():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = json.loads(
+                handlers["browser_vision"](
+                    {"question": "Loop safe?", "annotate": False},
+                    task_id="vision-runtime",
+                )
+            )
+            gc.collect()
+        return result, caught
+
+    result, caught = asyncio.run(invoke_from_running_loop())
+
+    assert bridge_calls == ["coroutine"]
+    assert result["success"] is True
+    assert result["analysis"] == "runtime:Loop safe?"
+    runtime_warnings = [
+        warning for warning in caught if issubclass(warning.category, RuntimeWarning)
+    ]
+    assert all(
+        "was never awaited" not in str(warning.message) for warning in runtime_warnings
+    )
+    assert all(
+        "Cannot run the event loop while another loop is running"
+        not in str(warning.message)
+        for warning in runtime_warnings
+    )
+
+
+def test_browser_vision_runs_vision_tool_off_event_loop_thread(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="vision-loop")
+
+    async def _analyze(image_url: str, user_prompt: str, model=None, task_id=None):
+        await asyncio.sleep(0)
+        return json.dumps({"success": True, "analysis": f"wrapped:{user_prompt}", "image_url": image_url})
+
+    def nested_loop_wrapper(image_url: str, user_prompt: str, model=None, task_id=None):
+        return asyncio.run(_analyze(image_url, user_prompt, model=model, task_id=task_id))
+
+    monkeypatch.setattr(sys.modules["tools.vision_tools"], "vision_analyze_tool", nested_loop_wrapper)
+    monkeypatch.delitem(sys.modules, "model_tools", raising=False)
+
+    async def invoke_from_running_loop():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = json.loads(
+                handlers["browser_vision"](
+                    {"question": "Loop safe?", "annotate": False},
+                    task_id="vision-loop",
+                )
+            )
+            gc.collect()
+        return result, caught
+
+    result, caught = asyncio.run(invoke_from_running_loop())
+
+    assert result["success"] is True
+    assert result["analysis"] == "wrapped:Loop safe?"
+    runtime_warnings = [
+        warning for warning in caught if issubclass(warning.category, RuntimeWarning)
+    ]
+    assert all(
+        "was never awaited" not in str(warning.message) for warning in runtime_warnings
+    )
+    assert all(
+        "Cannot run the event loop while another loop is running"
+        not in str(warning.message)
+        for warning in runtime_warnings
+    )
+
+
+
 def test_browser_vision_annotation_badges_follow_ref_numbers_when_earlier_ref_not_drawable(
     plugin, monkeypatch, tmp_path
 ):
@@ -1683,6 +1838,55 @@ def test_session_manager_status_drops_stale_external_close_sessions(
     assert status["connected"] is False
     assert status["sessions"] == 0
     manager.close_all()
+
+
+def test_session_manager_garbage_collection_closes_shared_context(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+    manager.page_for(task_id="gc-task")
+
+    del manager
+    gc.collect()
+
+    assert len(FakeBrowserContext.created) == 1
+    assert FakeBrowserContext.closed == FakeBrowserContext.created
+
+
+def test_session_manager_garbage_collection_closes_relaunched_context_after_close_all(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+    manager.page_for(task_id="first-life")
+    manager.close_all()
+
+    manager.page_for(task_id="second-life")
+
+    del manager
+    gc.collect()
+
+    assert len(FakeBrowserContext.created) == 2
+    assert FakeBrowserContext.closed == FakeBrowserContext.created
 
 
 def test_adapter_reuses_single_owner_for_loop_bound_context(plugin, monkeypatch, tmp_path):
@@ -2354,6 +2558,65 @@ def test_session_manager_same_profile_managers_share_owner_runner_until_final_cl
     assert relaunched["url"] == "https://example.test/four"
     assert len(AsyncLoopBoundContext.created) == 2
     first_manager.close_all()
+
+
+def test_same_profile_cross_process_collision_returns_clean_plugin_error(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+
+    def create(**options):
+        raise RuntimeError(
+            "Failed to create browser context: ProcessSingleton: profile already in use"
+        )
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    manager = plugin.session_manager.SessionManager(
+        plugin.config.load_config(
+            FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+        ).settings
+    )
+
+    result = manager.adapter.call(
+        "browser_navigate",
+        {"url": "https://example.test/collision"},
+        task_id="task-collision",
+    )
+
+    assert result["tool"] == "browser_navigate"
+    assert "persistent profile already in use by another Hermes process" in result["error"]
+    assert "same-profile sharing works only inside one Hermes process" in result["error"]
+    assert "ProcessSingleton" not in result["error"]
+    manager.close_all()
+
+
+
+def test_same_profile_cross_process_collision_appears_in_cloak_status(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+
+    def create(**options):
+        raise RuntimeError(
+            "browser launch failed: ProcessSingleton lock held by another process"
+        )
+
+    fake_sdk.create = create
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    ctx = FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    plugin.register(ctx)
+
+    tool_output = json.loads(
+        ctx.registered_tools[0]["handler"](
+            {"url": "https://example.test/collision"}, task_id="task-collision"
+        )
+    )
+    status_output = ctx.registered_commands[0]["handler"]("status")
+
+    assert "persistent profile already in use by another Hermes process" in tool_output["error"]
+    assert "errors: persistent profile already in use by another Hermes process" in status_output
+
 
 
 def test_session_manager_acquire_waits_for_final_close_teardown(
