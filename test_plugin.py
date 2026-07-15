@@ -201,11 +201,11 @@ def test_config_omits_viewport_by_default_for_sdk_parity(plugin, tmp_path):
     parsed = plugin.config.load_config(FakeCtx({"user_data_dir": str(tmp_path / "profile")}))
 
     assert parsed.valid is True
-    assert parsed.settings.chromium_sandbox is True
+    assert parsed.settings.chromium_sandbox is None
     assert parsed.settings.viewport_width is None
     assert parsed.settings.viewport_height is None
     assert "viewport" not in parsed.settings.to_sdk_options()
-    assert parsed.settings.to_sdk_options()["chromium_sandbox"] is True
+    assert "chromium_sandbox" not in parsed.settings.to_sdk_options()
 
 
 def test_config_parses_stringified_empty_args_list(plugin, tmp_path):

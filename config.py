@@ -17,7 +17,7 @@ _FALSE_STRINGS = {"0", "false", "no", "off"}
 class CloakConfig:
     user_data_dir: str
     headless: bool = True
-    chromium_sandbox: bool = True
+    chromium_sandbox: bool | None = None
     humanize: bool = True
     human_preset: str = "default"
     stealth_args: bool = True
@@ -43,13 +43,14 @@ class CloakConfig:
         options: dict[str, Any] = {
             "user_data_dir": self.user_data_dir,
             "headless": self.headless,
-            "chromium_sandbox": self.chromium_sandbox,
             "humanize": self.humanize,
             "human_preset": self.human_preset,
             "stealth_args": self.stealth_args,
             "geoip": self.geoip,
             "args": args,
         }
+        if self.chromium_sandbox is not None:
+            options["chromium_sandbox"] = self.chromium_sandbox
         if self.viewport_width is not None and self.viewport_height is not None:
             options["viewport"] = {
                 "width": self.viewport_width,
@@ -314,9 +315,7 @@ def load_config(ctx: Any) -> ConfigResult:
     settings = CloakConfig(
         user_data_dir=_validate_user_data_dir(raw.get("user_data_dir"), errors),
         headless=_parse_bool(raw.get("headless"), True, "headless", errors),
-        chromium_sandbox=_parse_bool(
-            raw.get("chromium_sandbox"), True, "chromium_sandbox", errors
-        ),
+        chromium_sandbox=_parse_optional_bool(raw.get("chromium_sandbox"), "chromium_sandbox", errors),
         humanize=_parse_bool(raw.get("humanize"), True, "humanize", errors),
         human_preset=preset,
         stealth_args=_parse_bool(raw.get("stealth_args"), True, "stealth_args", errors),
