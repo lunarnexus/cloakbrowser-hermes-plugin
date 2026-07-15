@@ -1029,15 +1029,15 @@ def test_adapter_create_context_prefers_direct_persistent_launch_before_create(
     fake_sdk = types.ModuleType("cloakbrowser")
     calls = []
 
-    async def launch_persistent_context_async(**options):
-        calls.append(("launch_persistent_context_async", options))
+    def launch_persistent_context(**options):
+        calls.append(("launch_persistent_context", options))
         return FakeBrowserContext(**options)
 
     def create(**options):
         calls.append(("create", options))
         return FakeBrowserContext(**options)
 
-    setattr(fake_sdk, "launch_persistent_context_async", launch_persistent_context_async)
+    setattr(fake_sdk, "launch_persistent_context", launch_persistent_context)
     setattr(fake_sdk, "create", create)
     monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
     settings = plugin.config.load_config(
@@ -1047,25 +1047,25 @@ def test_adapter_create_context_prefers_direct_persistent_launch_before_create(
     context = plugin.adapter.CloakBrowserAdapter(settings).create_context()
 
     assert isinstance(context, plugin.adapter._OwnedSDKProxy)
-    assert [name for name, _options in calls] == ["launch_persistent_context_async"]
+    assert [name for name, _options in calls] == ["launch_persistent_context"]
     assert calls[0][1]["user_data_dir"] == str((tmp_path / "profile").resolve())
 
 
-def test_adapter_create_context_falls_back_to_launch_async_before_create(
+def test_adapter_create_context_falls_back_to_launch_before_create(
     plugin, monkeypatch, tmp_path
 ):
     fake_sdk = types.ModuleType("cloakbrowser")
     calls = []
 
-    async def launch_async(**options):
-        calls.append(("launch_async", options))
+    def launch(**options):
+        calls.append(("launch", options))
         return FakeBrowserContext(**options)
 
     def create(**options):
         calls.append(("create", options))
         return FakeBrowserContext(**options)
 
-    setattr(fake_sdk, "launch_async", launch_async)
+    setattr(fake_sdk, "launch", launch)
     setattr(fake_sdk, "create", create)
     monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
     settings = plugin.config.load_config(
@@ -1075,7 +1075,7 @@ def test_adapter_create_context_falls_back_to_launch_async_before_create(
     context = plugin.adapter.CloakBrowserAdapter(settings).create_context()
 
     assert isinstance(context, plugin.adapter._OwnedSDKProxy)
-    assert [name for name, _options in calls] == ["launch_async"]
+    assert [name for name, _options in calls] == ["launch"]
     assert "user_data_dir" not in calls[0][1]
 
 

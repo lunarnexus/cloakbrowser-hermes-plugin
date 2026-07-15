@@ -348,14 +348,14 @@ class CloakBrowserAdapter:
         if "user_data_dir" in options:
             launch_candidates.extend(
                 [
-                    ("launch_persistent_context_async", options),
                     ("launch_persistent_context", options),
+                    ("launch_persistent_context_async", options),
                 ]
             )
         launch_candidates.extend(
             [
-                ("launch_async", launch_options),
                 ("launch", launch_options),
+                ("launch_async", launch_options),
             ]
         )
 
