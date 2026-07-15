@@ -43,6 +43,62 @@ SECRET_PATTERNS = [
 BLOCKED_HOSTS = {"localhost", "localhost.localdomain", "metadata.google.internal"}
 METADATA_IPS = {"169.254.169.254", "169.254.170.2"}
 MAX_REDACTED_TEXT = 20000
+DOM_SETTLE_QUIET_MS = 500
+DOM_SETTLE_TIMEOUT_MS = 5000
+CHALLENGE_TITLE_PAUSE_SECONDS = 1.5
+CHALLENGE_TITLE_KEYWORDS = ("checking", "just a moment")
+SETTLE_JS = """
+() => new Promise((resolve) => {
+  const start = Date.now();
+  const done = (settled, mutations, observer) => {
+    try {
+      observer.disconnect();
+    } catch (error) {
+      // ignore disconnect issues in page context
+    }
+    resolve({
+      settled,
+      mutations,
+      elapsed_ms: Date.now() - start,
+    });
+  };
+  if (!document.body) {
+    resolve({ settled: true, mutations: 0, elapsed_ms: 0 });
+    return;
+  }
+  let mutations = 0;
+  let quietTimer = null;
+  let finished = false;
+  const finish = (settled) => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    if (quietTimer) {
+      clearTimeout(quietTimer);
+    }
+    done(settled, mutations, observer);
+  };
+  const resetQuietTimer = () => {
+    if (quietTimer) {
+      clearTimeout(quietTimer);
+    }
+    quietTimer = setTimeout(() => finish(true), __QUIET_MS__);
+  };
+  const observer = new MutationObserver((records) => {
+    mutations += records.length;
+    resetQuietTimer();
+  });
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    characterData: true,
+  });
+  resetQuietTimer();
+  setTimeout(() => finish(false), __TIMEOUT_MS__);
+})
+"""
 
 
 _OWNER_SENTINEL_TYPES = (str, bytes, bytearray, int, float, bool, type(None), Path)
@@ -330,19 +386,18 @@ class CloakBrowserAdapter:
         if not url:
             raise ValueError("url is required")
         self._assert_safe_url(str(url))
-        response = self.run(
-            page.goto(str(url), wait_until=args.get("wait_until", "load"))
-        )
+        goto_kwargs = {"wait_until": args.get("wait_until", "load")}
+        if args.get("timeout") is not None:
+            goto_kwargs["timeout"] = args.get("timeout")
+        response = self.run(page.goto(str(url), **goto_kwargs))
         current_url = getattr(page, "url", str(url))
         self._assert_safe_page_url(current_url)
         self._clear_ref_map(page)
-        title = ""
-        page_title = getattr(page, "title", None)
-        if callable(page_title):
-            try:
-                title = str(self.run(page_title()) or "")
-            except Exception:
-                title = ""
+        title = self._page_title(page)
+        if self._is_challenge_title(title):
+            self._sleep(CHALLENGE_TITLE_PAUSE_SECONDS)
+        settle = self._wait_for_dom_settle(page)
+        title = self._page_title(page)
         snapshot_result = self._snapshot(page, {"full": False})
         result = {
             "success": True,
@@ -350,11 +405,41 @@ class CloakBrowserAdapter:
             "title": title,
             "status": getattr(response, "status", None),
             "ok": getattr(response, "ok", None),
+            "settled": settle.get("settled", False),
         }
         for key in ("snapshot", "element_count", "pending_dialogs", "frame_tree"):
             if key in snapshot_result:
                 result[key] = snapshot_result[key]
         return result
+
+    def _page_title(self, page: Any) -> str:
+        page_title = getattr(page, "title", None)
+        if not callable(page_title):
+            return ""
+        try:
+            return str(self.run(page_title()) or "")
+        except Exception:
+            return ""
+
+    def _is_challenge_title(self, title: str) -> bool:
+        lowered = title.strip().lower()
+        return any(keyword in lowered for keyword in CHALLENGE_TITLE_KEYWORDS)
+
+    def _wait_for_dom_settle(self, page: Any) -> dict[str, Any]:
+        try:
+            result = self.run(
+                page.evaluate(
+                    SETTLE_JS.replace("__QUIET_MS__", str(DOM_SETTLE_QUIET_MS)).replace(
+                        "__TIMEOUT_MS__", str(DOM_SETTLE_TIMEOUT_MS)
+                    )
+                )
+            )
+        except Exception:
+            return {"settled": False, "mutations": 0, "elapsed_ms": DOM_SETTLE_TIMEOUT_MS}
+        return result if isinstance(result, dict) else {"settled": False}
+
+    def _sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
 
     def _snapshot(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
         self._assert_safe_page_url(getattr(page, "url", None))
@@ -442,7 +527,7 @@ class CloakBrowserAdapter:
 
     def _click(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
         locator = self._locator(page, self._selector(args))
-        self.run(locator.click())
+        self._retry_action(lambda: self.run(locator.click(timeout=5000)), max_retries=1)
         return {"clicked": True}
 
     def _type(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -533,6 +618,19 @@ class CloakBrowserAdapter:
 
     def _human_pause(self, low: float, high: float) -> None:
         time.sleep(random.uniform(low, high))
+
+    def _retry_action(self, action: Callable[[], Any], *, max_retries: int = 1) -> Any:
+        last_error: BaseException | None = None
+        for attempt in range(1 + max_retries):
+            try:
+                return action()
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    time.sleep(0.5)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("retry action failed without executing action")
 
     def _scroll(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
         direction = str(args.get("direction", "down")).lower()

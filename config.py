@@ -22,6 +22,7 @@ class CloakConfig:
     stealth_args: bool = True
     geoip: bool = False
     args: list[str] = field(default_factory=list)
+    fingerprint_seed: str | None = None
     proxy: str | None = None
     locale: str | None = None
     timezone: str | None = None
@@ -31,6 +32,11 @@ class CloakConfig:
     auto_update: bool | None = None
 
     def to_sdk_options(self) -> dict[str, Any]:
+        args = list(self.args)
+        if self.fingerprint_seed is not None and not any(
+            arg.startswith("--fingerprint=") for arg in args
+        ):
+            args.append(f"--fingerprint={self.fingerprint_seed}")
         options: dict[str, Any] = {
             "user_data_dir": self.user_data_dir,
             "headless": self.headless,
@@ -38,7 +44,7 @@ class CloakConfig:
             "human_preset": self.human_preset,
             "stealth_args": self.stealth_args,
             "geoip": self.geoip,
-            "args": list(self.args),
+            "args": args,
         }
         for key in _OPTIONAL_STRINGS:
             value = getattr(self, key)
@@ -254,6 +260,12 @@ def load_config(ctx: Any) -> ConfigResult:
         preset = "default"
 
     args = _parse_args(raw.get("args", []), errors)
+    fingerprint_seed = _optional_string(raw.get("fingerprint_seed"))
+    if fingerprint_seed and any(arg.startswith("--fingerprint=") for arg in args):
+        warnings.append(
+            "fingerprint_seed ignored because args already include --fingerprint=..."
+        )
+        fingerprint_seed = None
 
     optional_values = {key: _optional_string(raw.get(key)) for key in _OPTIONAL_STRINGS}
     geoip = _parse_bool(raw.get("geoip"), False, "geoip", errors)
@@ -269,6 +281,7 @@ def load_config(ctx: Any) -> ConfigResult:
         stealth_args=_parse_bool(raw.get("stealth_args"), True, "stealth_args", errors),
         geoip=geoip,
         args=list(args),
+        fingerprint_seed=fingerprint_seed,
         auto_acknowledge_banner=_parse_bool(
             raw.get("auto_acknowledge_banner"),
             True,

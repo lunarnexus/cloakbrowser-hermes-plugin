@@ -59,22 +59,28 @@ plugins:
         human_preset: default
         stealth_args: true
         geoip: false
-        proxy: null
-        locale: null
-        timezone: null
-        color_scheme: null
-        user_agent: null
+        # Optional fingerprint identity seed. Current plugin maps this to
+        # args: ["--fingerprint=<seed>"] because current public Python docs do
+        # not document a first-class fingerprint_seed launch kwarg.
+        # fingerprint_seed: "stable-profile-a"
         args: []
+        # Optional strings: omit when unset.
+        # proxy: ""
+        # locale: ""
+        # timezone: ""
+        # color_scheme: ""
+        # user_agent: ""
         # Write CloakBrowser SDK banner marker before launch. Default: true.
         auto_acknowledge_banner: true
-        # Optional tri-state. Omit/null or true leaves SDK/env behavior unchanged.
-        # false sets CLOAKBROWSER_AUTO_UPDATE=false only when the env var is absent.
-        auto_update: null
+        # Optional tri-state: omit when unset.
+        # auto_update: false
 ```
 
 `auto_acknowledge_banner` writes a fresh integer Unix timestamp to CloakBrowser's `.welcome_shown` marker in `cloakbrowser.download.get_cache_dir()` before SDK launch. Marker write failures are non-fatal and do not block launch.
 
 `auto_update` controls the SDK auto-update environment only when explicitly disabled. Environment precedence is strict: an existing `CLOAKBROWSER_AUTO_UPDATE` value always wins and is never overwritten. If `auto_update: false` and the env var is absent, the plugin sets `CLOAKBROWSER_AUTO_UPDATE=false` before launch. If `auto_update` is omitted, `null`, or `true`, the plugin leaves SDK defaults and the environment unchanged.
+
+`fingerprint_seed` is supported in this plugin slice via the documented wrapper-equivalent flag form. When set, the plugin appends `--fingerprint=<seed>` to the SDK `args` list unless `args` already contains an explicit `--fingerprint=...` value; in that case the explicit arg wins and the plugin emits a config warning.
 
 Safety rules for `user_data_dir`:
 - Use a dedicated CloakBrowser profile directory.
@@ -97,6 +103,10 @@ Expected for this foundation slice:
 - If `cloakbrowser` is importable and config is valid, browser tool overrides register and route calls through the direct SDK context.
 
 This is runtime verification for active Hermes/mina session, not proof from arbitrary shell Python.
+
+Important: `/cloak status` is not proof of anti-bot parity or Reddit/login success. In particular, `headless: true` parity with the earlier wrapper setup remains unproven until live verification covers challenge handling, click resilience, and fingerprint coherence.
+
+Also still blocked in this slice: headed viewport auto-derive parity. Current public CloakBrowser Python docs document `viewport` on `launch_context()` / `launch_persistent_context()`, but this plugin routes through runtime-selected `create()` / `launch_persistent_context()` factories and no installed SDK signature/source was available here to prove safe `create()` viewport wiring.
 
 For real mina verification, run the check inside target Hermes/mina runtime:
 - start fresh session for profile under test

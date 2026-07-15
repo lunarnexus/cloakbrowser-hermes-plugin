@@ -153,6 +153,7 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
                         "proxy": "",
                         "locale": None,
                         "timezone": "UTC",
+                        "fingerprint_seed": "seed-123",
                         "args": ["--disable-gpu"],
                         "auto_acknowledge_banner": False,
                         "auto_update": False,
@@ -174,9 +175,14 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
     assert parsed.settings.proxy is None
     assert parsed.settings.locale is None
     assert parsed.settings.timezone == "UTC"
+    assert parsed.settings.fingerprint_seed == "seed-123"
     assert parsed.settings.args == ["--disable-gpu"]
     assert parsed.settings.auto_acknowledge_banner is False
     assert parsed.settings.auto_update is False
+    assert parsed.settings.to_sdk_options()["args"] == [
+        "--disable-gpu",
+        "--fingerprint=seed-123",
+    ]
     assert "allow_tool_override" not in parsed.settings.to_sdk_options()
     assert "geoip requires proxy" in "; ".join(parsed.warnings)
 
@@ -224,6 +230,43 @@ def test_config_rejects_malformed_stringified_args(plugin, tmp_path):
         "args must be a list of strings; string values must decode to a JSON/YAML list of strings"
         in error
         for error in parsed.errors
+    )
+
+
+def test_fingerprint_seed_uses_documented_fingerprint_arg_equivalent(plugin, tmp_path):
+    parsed = plugin.config.load_config(
+        FakeCtx(
+            {
+                "user_data_dir": str(tmp_path / "profile"),
+                "fingerprint_seed": "stable-seed",
+            }
+        )
+    )
+
+    assert parsed.valid is True
+    assert parsed.settings.fingerprint_seed == "stable-seed"
+    assert parsed.settings.to_sdk_options()["args"] == ["--fingerprint=stable-seed"]
+
+
+def test_fingerprint_seed_yields_to_explicit_fingerprint_arg(plugin, tmp_path):
+    parsed = plugin.config.load_config(
+        FakeCtx(
+            {
+                "user_data_dir": str(tmp_path / "profile"),
+                "fingerprint_seed": "stable-seed",
+                "args": ["--fingerprint=from-args", "--disable-gpu"],
+            }
+        )
+    )
+
+    assert parsed.valid is True
+    assert parsed.settings.fingerprint_seed is None
+    assert parsed.settings.to_sdk_options()["args"] == [
+        "--fingerprint=from-args",
+        "--disable-gpu",
+    ]
+    assert "fingerprint_seed ignored because args already include --fingerprint=..." in "; ".join(
+        parsed.warnings
     )
 
 
@@ -554,8 +597,15 @@ class FakeElement:
     def __init__(self, page, selector):
         self.page = page
         self.selector = selector
+        self.click_calls = []
 
-    def click(self):
+    def click(self, timeout=None):
+        self.click_calls.append(timeout)
+        self.page.click_calls.append((self.selector, timeout))
+        remaining_failures = self.page.click_failures.get(self.selector, 0)
+        if remaining_failures > 0:
+            self.page.click_failures[self.selector] = remaining_failures - 1
+            raise RuntimeError(f"click failed for {self.selector}")
         self.page.events.append(("click", self.selector))
 
     def focus(self):
@@ -617,7 +667,10 @@ class FakePage:
     def __init__(self):
         self.url = "about:blank"
         self.title_value = "Fake"
+        self.title_values = None
         self.events = []
+        self.click_calls = []
+        self.click_failures = {}
         self.closed_flag = False
         self.mouse = FakeMouse(self)
         self.keyboard = FakeKeyboard(self)
@@ -637,6 +690,7 @@ class FakePage:
         self.listeners = {}
         self.screenshots = []
         self.evaluate_scripts = []
+        self.settle_result = {"settled": True, "mutations": 3, "elapsed_ms": 500}
         self.dom_fallback_elements = [
             {"ref": "@e1", "selector": "#dom-go", "text": "DOM Go", "role": "button"},
             {"ref": "@e2", "selector": "#dom-input", "text": "", "role": "input"},
@@ -674,6 +728,13 @@ class FakePage:
         return self.closed_flag
 
     def title(self):
+        if self.title_values:
+            current = self.title_values.pop(0)
+            if self.title_values:
+                self.title_value = self.title_values[0]
+            else:
+                self.title_value = current
+            return current
         return self.title_value
 
     def locator(self, selector):
@@ -689,6 +750,8 @@ class FakePage:
 
     def evaluate(self, script, *args):
         self.evaluate_scripts.append(script)
+        if "MutationObserver" in script:
+            return self.settle_result
         if args and "getBoundingClientRect" in script:
             selectors = args[0]
             boxes = {
@@ -813,6 +876,7 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
                         "headless": False,
                         "humanize": False,
                         "stealth_args": False,
+                        "fingerprint_seed": "runtime-seed",
                         "args": [],
                         "auto_acknowledge_banner": False,
                         "auto_update": False,
@@ -839,6 +903,7 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
     assert parsed.settings.headless is False
     assert parsed.settings.humanize is False
     assert parsed.settings.stealth_args is False
+    assert parsed.settings.fingerprint_seed == "runtime-seed"
     assert parsed.settings.args == []
     assert parsed.settings.auto_acknowledge_banner is False
     assert parsed.settings.auto_update is False
@@ -848,7 +913,7 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
     assert FakeBrowserContext.created[-1].options["humanize"] is False
     assert FakeBrowserContext.created[-1].options["stealth_args"] is False
     assert FakeBrowserContext.created[-1].options["user_data_dir"] == str(profile.resolve())
-    assert FakeBrowserContext.created[-1].options["args"] == []
+    assert FakeBrowserContext.created[-1].options["args"] == ["--fingerprint=runtime-seed"]
     assert os.environ["CLOAKBROWSER_AUTO_UPDATE"] == "false"
 
 
@@ -984,8 +1049,12 @@ def test_browser_handlers_perform_direct_sdk_operations(plugin, monkeypatch, tmp
     assert navigate["success"] is True
     assert navigate["url"] == "https://example.test"
     assert navigate["title"] == "Fake"
+    assert navigate["settled"] is True
     assert "Fake page" in navigate["snapshot"]
     assert navigate["element_count"] == 2
+    page = FakeBrowserContext.created[0].pages[0]
+    assert page.events[0] == ("goto", "https://example.test", "load")
+    assert any("MutationObserver" in script for script in page.evaluate_scripts)
 
     snapshot = json.loads(handlers["browser_snapshot"]({}, task_id="task-a"))
     assert snapshot["success"] is True
@@ -1049,6 +1118,55 @@ def test_browser_snapshot_full_true_uses_non_compact_accessibility_snapshot(plug
     assert "textbox Search" in result["snapshot"]
 
 
+def test_browser_navigate_honors_explicit_wait_until_override(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+
+    result = json.loads(
+        handlers["browser_navigate"](
+            {"url": "https://example.test", "wait_until": "domcontentloaded"},
+            task_id="navigate-domcontentloaded",
+        )
+    )
+
+    page = FakeBrowserContext.created[0].pages[0]
+    assert result["success"] is True
+    assert page.events[0] == ("goto", "https://example.test", "domcontentloaded")
+    assert any("MutationObserver" in script for script in page.evaluate_scripts)
+
+
+def test_browser_navigate_pauses_on_challenge_title_then_returns_updated_title(
+    plugin, monkeypatch, tmp_path
+):
+    sleep_calls = []
+    monkeypatch.setattr(plugin.adapter.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    fake_sdk = types.ModuleType("cloakbrowser")
+
+    def create_context(**options):
+        context = FakeBrowserContext(**options)
+        context.pages[0].title_values = ["Just a moment", "After challenge"]
+        return context
+
+    fake_sdk.create = create_context
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    ctx = FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    plugin.register(ctx)
+    handlers = {tool["name"]: tool["handler"] for tool in ctx.registered_tools}
+
+    result = json.loads(
+        handlers["browser_navigate"](
+            {"url": "https://example.test/challenge"},
+            task_id="navigate-challenge",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["title"] == "After challenge"
+    assert sleep_calls == [1.5]
+
+
 def test_browser_snapshot_default_uses_compact_accessibility_snapshot(plugin, monkeypatch, tmp_path):
     handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
     handlers["browser_navigate"]({"url": "https://example.test"}, task_id="snapshot-compact")
@@ -1102,6 +1220,38 @@ def test_browser_snapshot_dom_fallback_refs_support_click_and_type(plugin, monke
         ("press", "b"),
         ("press", "c"),
     ]
+
+
+def test_browser_click_retries_once_after_failure(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="click-retry")
+    page = FakeBrowserContext.created[-1].pages[0]
+    page.click_failures["#go"] = 1
+    sleep_calls = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    result = json.loads(handlers["browser_click"]({"selector": "#go"}, task_id="click-retry"))
+
+    assert result["clicked"] is True
+    assert page.click_calls == [("#go", 5000), ("#go", 5000)]
+    assert sleep_calls == [0.5]
+    assert ("click", "#go") in page.events
+
+
+def test_browser_click_raises_after_single_retry(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
+    handlers["browser_navigate"]({"url": "https://example.test"}, task_id="click-fail")
+    page = FakeBrowserContext.created[-1].pages[0]
+    page.click_failures["#go"] = 2
+    sleep_calls = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    result = json.loads(handlers["browser_click"]({"selector": "#go"}, task_id="click-fail"))
+
+    assert result == {"error": "click failed for #go", "tool": "browser_click"}
+    assert page.click_calls == [("#go", 5000), ("#go", 5000)]
+    assert sleep_calls == [0.5]
+    assert ("click", "#go") not in page.events
 
 
 @pytest.mark.parametrize("submit", [False, True])

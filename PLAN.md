@@ -13,6 +13,357 @@ Rewrite `cloakbrowser-hermes-plugin` from an MCP-backed browser-tool override pl
 - Current stale `browser.cloakbrowser` config blocks are legacy/native-reference material only. They are not the target plugin configuration surface for this rewrite.
 - Preserve current plugin value: override built-in browser tools with `ctx.register_tool(..., override=True)` and expose `/cloak`, but replace `ctx.dispatch_tool()`/MCP transport with plugin-owned direct SDK runtime state.
 
+## Evidence-based Anti-Bot Inventory (2026-07-15 refresh)
+
+This section is the current source-backed inventory of anti-bot / stealth / humanization techniques across:
+
+- old MCP server (`/home/james/workspace/cloakbrowser-mcp`)
+- old native integrated Hermes branch (`feat/cloakbrowser-native-browser-backend` in `/home/james/.hermes/hermes-agent`)
+- current standalone plugin (`/home/james/workspace/cloakbrowser-hermes-plugin`)
+
+Initial audit fell back to direct reads because CodeGraph was temporarily unavailable; later review confirmed the indexed repo state.
+
+### 1. Verified MCP techniques
+
+#### 1.1 SDK/browser launch options and fingerprint-shaping inputs
+
+The MCP explicitly passed through these CloakBrowser knobs into `SessionConfig` and launch:
+
+- `proxy`
+- `humanize`
+- `human_preset`
+- `stealth_args`
+- `timezone`
+- `locale`
+- `geoip`
+- `extra_args`
+- `fingerprint_seed`
+- `user_data_dir`
+- `viewport`
+- `color_scheme`
+- `user_agent`
+
+Sources:
+
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:195-210`
+- `cloakbrowser-mcp/cloakbrowsermcp/session.py:127-149`
+
+Important note: several of these are SDK pass-throughs, not wrapper-implemented stealth logic. But they still matter because they control fingerprint coherence at launch.
+
+#### 1.2 Persistent profile/session reuse
+
+The MCP supported persistent profile reuse via `user_data_dir`, switching to persistent-context launch when present.
+
+Sources:
+
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:205-207`
+- `cloakbrowser-mcp/cloakbrowsermcp/session.py:144-145`
+- `cloakbrowser-mcp/README.md:181-182`
+
+This matters because stored cookies/local storage/account history reduce fresh-profile suspicion.
+
+#### 1.3 Headed viewport realism
+
+In headed mode, the MCP auto-detected usable screen size and derived a bounded viewport rather than blindly using a fixed default.
+
+Sources:
+
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:180-193`
+- `cloakbrowser-mcp/cloakbrowsermcp/session.py:21-108`
+
+This helps cross-signal coherence for screen/viewport/window metrics in headed mode.
+
+#### 1.4 Smart navigation and challenge-aware waiting
+
+The MCP did not use plain `load`. It used:
+
+- `page.goto(..., wait_until="domcontentloaded")`
+- DOM settle detection via `MutationObserver`
+- special extra pause when title matched challenge-like text (`checking`, `just a moment`)
+
+Sources:
+
+- `cloakbrowser-mcp/cloakbrowsermcp/waiting.py:5-43`
+- `cloakbrowser-mcp/cloakbrowsermcp/waiting.py:70-97`
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:224-233`
+
+This is the strongest wrapper-level anti-bot technique missing from the current plugin.
+
+#### 1.5 Click retry / transient-failure recovery
+
+The MCP wrapped clicks in a one-retry helper with a 500ms pause between attempts.
+
+Sources:
+
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:236-245`
+- `cloakbrowser-mcp/cloakbrowsermcp/waiting.py:100-110`
+
+This is not stealth by itself, but it reduces brittle failures during dynamic page/challenge churn.
+
+#### 1.6 Humanized typing for auth-sensitive flows
+
+The MCP implemented richer typing behavior than plain `fill()`:
+
+- click into the field first
+- pause before typing
+- clear with `Control+A` then `Backspace`
+- type one character at a time with uneven delays
+- add occasional extra pauses at punctuation and every ~7-14 chars
+- optional delayed `Enter` submit
+
+Sources:
+
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:248-279`
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:282-306`
+
+This was a real wrapper-level humanization technique, not just an SDK flag.
+
+#### 1.7 Humanized drag path
+
+The MCP also had curved, jittered drag behavior with non-center target points, variable timing, and fallback to `drag_to`.
+
+Sources:
+
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:337-475`
+
+Not directly relevant to Reddit login, but it shows the MCP had additional humanized interaction logic beyond typing.
+
+#### 1.8 Stealth-by-default documented posture
+
+The MCP README explicitly documented these expectations:
+
+- source-patched Chromium
+- `humanize=True` by default
+- `stealth_args=True` by default
+- proxy + GeoIP-based timezone/locale support
+- consistent fingerprinting via `fingerprint_seed`
+
+Sources:
+
+- `cloakbrowser-mcp/README.md:99-104`
+- `cloakbrowser-mcp/README.md:173-183`
+
+Important doc-drift caveat from the audit:
+
+- README claims smart settle uses `networkidle + MutationObserver`, but main navigation code only does `domcontentloaded + MutationObserver`.
+- README claims humanized scroll patterns, but the MCP scroll implementation is plain scroll movement, not a rich humanized scroll path.
+
+Sources:
+
+- `cloakbrowser-mcp/README.md:19`, `cloakbrowser-mcp/README.md:101`, `cloakbrowser-mcp/README.md:208`
+- `cloakbrowser-mcp/cloakbrowsermcp/waiting.py:80-97`
+- `cloakbrowser-mcp/cloakbrowsermcp/server.py:1027-1045`
+
+These are partly docs and partly config surface, but they reflect the intended anti-bot contract of the old setup while also showing where the docs overstated the MCP Python layer.
+
+### 2. Verified native integrated Hermes branch techniques
+
+Important: the native branch that "worked" had less wrapper-level anti-bot logic than the old MCP. Its strength appears to have come more from native CloakBrowser launch/persistence integration than from richer interaction choreography.
+
+#### 2.1 Native CloakBrowser provider selection and local direct launch
+
+The branch supported a native local CloakBrowser backend selected via:
+
+- `browser.cloud_provider: cloakbrowser`
+- nested `browser.cloakbrowser.*` config
+
+Sources:
+
+- `feat/cloakbrowser-native-browser-backend:website/docs/user-guide/features/browser.md:310-347`
+- `feat/cloakbrowser-native-browser-backend:hermes_cli/config.py:1204-1217`
+
+#### 2.2 Launch pass-throughs actually implemented by the native branch
+
+The native wrapper passed these options through:
+
+- `headless`
+- `humanize`
+- `stealth_args`
+- `user_data_dir`
+- `proxy`
+- `geoip`
+- `locale`
+- `timezone`
+- `viewport_width`
+- `viewport_height`
+- `color_scheme`
+- `user_agent`
+- `extra_args`
+
+Sources:
+
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:91-118`
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:330-359`
+
+Notably absent from the native wrapper surface:
+
+- no `human_preset`
+- no `fingerprint_seed`
+- no wrapper-level challenge settle logic
+
+Evidence:
+
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:91-118`
+
+#### 2.3 Persistent context/profile reuse
+
+The native branch used `launch_persistent_context_async` whenever `user_data_dir` was present and reused the first existing page or created a new one.
+
+Sources:
+
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:343-352`
+
+#### 2.4 Page/session liveness recovery and timeout hardening
+
+The native branch had stronger runtime hardening than the old MCP or the early plugin rewrite:
+
+- dedicated loop threads
+- hard timeouts around launch and operations
+- page recreation when `is_closed()` returned true
+- teardown of poisoned sessions on timeout
+
+Sources:
+
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:121-171`
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:223-307`
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:366-377`
+- `feat/cloakbrowser-native-browser-backend:tests/tools/test_browser_cloakbrowser_timeout.py:1-260`
+
+This is resilience, not stealth, but it likely improved real-world success by avoiding stale/dead-state weirdness during long browser sessions.
+
+#### 2.5 Native branch navigation and typing were still thin
+
+Despite working better historically, the native branch wrapper itself did not implement old MCP-style auth choreography:
+
+- navigate: plain `page.goto(url, **timeout_only)`
+- type: plain `page.fill(selector, text)`
+- click: plain `page.click(selector)`
+
+Sources:
+
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:468-480`
+- `feat/cloakbrowser-native-browser-backend:tools/browser_cloakbrowser.py:604-676`
+
+So the native branch's prior success cannot be explained by wrapper-level humanized typing or smart settle logic. It was likely benefiting from CloakBrowser itself, persistent profile state, and/or environment/runtime differences.
+
+### 3. Verified current standalone plugin anti-bot techniques
+
+#### 3.1 Current launch/config surface
+
+The current plugin now passes through:
+
+- `user_data_dir`
+- `headless`
+- `humanize`
+- `human_preset`
+- `stealth_args`
+- `geoip`
+- `args`
+- optional `proxy`, `locale`, `timezone`, `color_scheme`, `user_agent`
+
+Sources:
+
+- `cloakbrowser-hermes-plugin/config.py:16-47`
+- `cloakbrowser-hermes-plugin/config.py:251-279`
+
+#### 3.2 Current profile persistence / same-profile auth reuse
+
+The plugin intentionally shares one persistent profile/login per canonical `user_data_dir` inside one Hermes process, with per-task page/ref/console isolation layered on top.
+
+Sources:
+
+- `cloakbrowser-hermes-plugin/README.md:9-12`
+- `cloakbrowser-hermes-plugin/session_manager.py:100-102`
+
+#### 3.3 Current humanized typing
+
+The plugin now has restored MCP-style humanized typing:
+
+- focus or click first
+- pause
+- select-all + backspace clear
+- per-character keyboard typing with uneven pauses
+- optional delayed Enter submit
+
+Sources:
+
+- `cloakbrowser-hermes-plugin/adapter.py:448-535`
+- `cloakbrowser-hermes-plugin/schemas.py:23-38`
+
+#### 3.4 Current gaps still verified in the plugin
+
+The plugin still lacks several techniques present in the MCP contract:
+
+1. Navigate is still plain `page.goto(... wait_until="load")` with no settle/challenge logic.
+   - Source: `cloakbrowser-hermes-plugin/adapter.py:328-357`
+
+2. Click is still plain `locator.click()` with no retry wrapper.
+   - Source: `cloakbrowser-hermes-plugin/adapter.py:443-446`
+
+3. No `fingerprint_seed` config surface or pass-through exists.
+   - Sources: `cloakbrowser-hermes-plugin/config.py:16-47`, `cloakbrowser-hermes-plugin/config.py:251-279`
+
+4. No headed screen auto-detect / auto-derived viewport behavior equivalent to the MCP is present.
+   - Current config has no viewport fields at all.
+   - Source: `cloakbrowser-hermes-plugin/config.py:16-31`
+
+### 4. Revised diagnosis after comparing all three implementations
+
+The old MCP had the richest wrapper-level anti-bot behavior.
+
+The old native branch that "worked" did not replicate most of that behavior in wrapper code, which means its success likely came from a combination of:
+
+- native CloakBrowser local mode
+- persistent profile reuse
+- headed-by-default operation in native config
+- stable runtime/session handling
+- CloakBrowser's own browser-level stealth features
+- possibly older/profile-specific accumulated trust state
+
+The current plugin has now recovered the most important missing interaction behavior (humanized typing), but still lacks two MCP-level techniques that remain high-priority for login pages:
+
+1. smart navigate / settle / challenge-aware waiting
+2. click retry / dynamic-page resilience
+
+And it still lacks one important identity-stability input the MCP exposed:
+
+3. `fingerprint_seed`
+
+### 5. Revised anti-bot parity worklist
+
+Priority order for the standalone plugin:
+
+1. Add MCP-style smart navigation parity:
+   - `domcontentloaded`
+   - settle wait using DOM mutation quiet period
+   - challenge-title detection with an extra pause
+
+2. Add retry wrapper around click-sensitive actions.
+
+3. Add `fingerprint_seed` to plugin config parsing, launch pass-through, docs, and tests.
+
+4. Decide whether to add headed viewport auto-detect / auto-derived viewport behavior.
+
+5. Add a live fingerprint audit checklist for headless mode covering:
+   - `navigator.webdriver`
+   - `window.chrome.runtime`
+   - plugins/mimeTypes
+   - outer/inner dimensions
+   - canvas/WebGL/audio
+   - permissions states
+   - cross-signal consistency with UA/platform/locale/timezone
+
+6. Treat `headless=true` Reddit login as unproven until the above are verified in real runtime output, not inferred from SDK docs.
+
+### 6. Separate bug now tracked alongside anti-bot work
+
+There is a separate session-exit bug reported by the user after a CloakBrowser session:
+
+- unhandled Node `EPIPE`
+- emitted after the Hermes session exits back to shell
+
+This is not an anti-bot issue. Track it separately as CLI/session shutdown plumbing, likely around output piping or subprocess/socket teardown after plugin/browser usage. Do not mix it into browser fingerprint diagnosis.
+
 ## Acceptance Criteria
 
 - Existing nine plugin overrides still work through direct SDK, not MCP:

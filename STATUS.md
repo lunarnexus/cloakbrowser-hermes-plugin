@@ -1,73 +1,62 @@
 # CloakBrowser Hermes Plugin Status / Handoff
 
-_Last updated: 2026-07-12 by Hermes subagent. Scope: `/home/james/workspace/cloakbrowser-hermes-plugin` only._
+_Last updated: 2026-07-15 by Sera. Scope: `/home/james/workspace/cloakbrowser-hermes-plugin` plus read-only comparison against `/home/james/workspace/cloakbrowser-mcp` and `feat/cloakbrowser-native-browser-backend` in `/home/james/.hermes/hermes-agent`._
 
 ## Goal
 
 Rewrite `cloakbrowser-hermes-plugin` from an MCP-backed browser-tool override plugin into a standalone Hermes plugin that uses the Python `cloakbrowser` SDK directly, while preserving the existing Hermes `browser_*` tool contracts and avoiding Hermes core changes.
 
-## Safety constraints
+## Current state
 
-- Do not touch Hermes config, `sera`, or other profile state while working this repo handoff.
-- Do not treat stale `browser.cloud_provider: cloakbrowser` / `browser.cloakbrowser:*` config as the target plugin setup; those are legacy/native-reference material only.
-- Do not use MCP runtime, `cloakbrowser-mcp`, MCP discovery gates, MCP envelope adapters, or MCP-owned browser state in the target rewrite.
-- Do not copy-forward the paused native-core experiment as the implementation.
-- Do not claim direct-SDK migration, packaging, feature parity, or verification is complete until current-code tests and smoke checks produce real output.
-- Same-profile persistent profile/login state is intentionally shared by canonical `user_data_dir` inside one Hermes process. Isolation boundary is a distinct `user_data_dir` (normally one per Hermes profile), while root/task/session work under the same profile gets distinct pages, refs, console buffers, and diagnostics.
-- Automated smoke should use temporary profiles and `about:blank` / `data:` URLs before any real website.
+- The standalone plugin implementation in this repo is active and no longer depends on MCP transport/runtime.
+- Humanized auth typing parity has been restored in the plugin (`browser_type` now does focus/click, keyboard clear, uneven per-character typing, optional Enter submit).
+- Headless runtime smoke in `mina` previously confirmed live Chrome-like UA/client-hints and successful typed-input smoke on Reddit login page.
+- Full credentialed Reddit login is still not proven fixed.
+- The remaining anti-bot gap is no longer believed to be just user-agent or basic typing.
 
-## Current completed research
+## Evidence-backed conclusions from the 2026-07-15 anti-bot audit
 
-- Target direction is selected: standalone direct-SDK Hermes plugin, no MCP, no Hermes core/native backend patch.
-- Existing plugin inventory from transition evidence: nine built-in browser tools are overridden via `ctx.register_tool(..., override=True)` and `/cloak` is registered with `ctx.register_command()`.
-- Existing plugin state is MCP-backed in docs/source history: handlers dispatch into MCP via `ctx.dispatch_tool()`; MCP owns launch/close, page registry, snapshot refs, console/download buffers, and cleanup.
-- Required target architecture is documented in `PLAN.md`:
-  - physical shared state keyed by canonical `user_data_dir` inside one process;
-  - task-local logical state keyed by `task_id -> page, ref map, console buffer, diagnostics`;
-  - start with one active sensitive CloakBrowser operation per shared profile where needed.
-- Historical native-core research found lifecycle hazards relevant to plugin design: registry-lock deadlock around browser I/O, duplicate physical page close, relaunch during teardown, acquire/final-close races, and unintended cross-profile sharing. These are evidence for design, not plugin readiness.
-- Official Hermes plugin docs were checked as the current authoritative plugin surface reference.
+1. The earlier wrapper had the richest wrapper-level anti-bot behavior.
+   - Smart navigate used `domcontentloaded` + DOM settle + challenge-title pause.
+   - Clicks had one-retry resilience.
+   - Typing used explicit humanized keyboard choreography.
+   - It exposed `fingerprint_seed` and headed viewport auto-sizing.
 
-## Key sources
+2. The old native integrated Hermes branch that historically worked did NOT reproduce most earlier-wrapper auth choreography.
+   - It launched native CloakBrowser locally with persistent profiles and direct config pass-through.
+   - It had stronger timeout/liveness/session hardening than the MCP.
+   - But its wrapper-level navigate/click/type paths were still plain compared with that earlier wrapper.
 
-- Repo plan: `/home/james/workspace/cloakbrowser-hermes-plugin/PLAN.md`
-- Transition/evidence doc: `/home/james/workspace/cloakbrowser-plugin-transition.md`
-- Current repo docs still describing old MCP-backed behavior:
-  - `/home/james/workspace/cloakbrowser-hermes-plugin/README.md`
-  - `/home/james/workspace/cloakbrowser-hermes-plugin/INSTALL.md`
-- Plugin metadata: `/home/james/workspace/cloakbrowser-hermes-plugin/plugin.yaml`
-- Official Hermes plugin docs: `https://hermes-agent.nousresearch.com/docs/developer-guide/plugins`
-  - Extract cache from this run: `/home/james/.hermes/profiles/sera/cache/web/hermes-agent.nousresearch.com-ac6255942f.md`
-- Recent delegation/source-session evidence is indexed in `/home/james/workspace/cloakbrowser-plugin-transition.md`, section 13, source session `20260712_020030_e09ea4`, messages 68095-69749.
+3. The current standalone plugin now matches that earlier wrapper on smart navigate, click retry, and humanized typing, but still lacks headed viewport auto-detect parity.
 
-## Current queued / active implementation slice
+4. `fingerprint_seed` is now supportable in the plugin only through the currently documented wrapper-equivalent flag path (`args += ["--fingerprint=<seed>"]`). Current public CloakBrowser Python docs do not expose a verified first-class `fingerprint_seed=` launch kwarg.
 
-- A repo implementation worker is reported as running separately.
-- The next planned slice in `PLAN.md` after Phase 0 discovery is **Phase 1: Config and dependency foundation**:
-  - parse runtime config from `plugins.entries.cloakbrowser-hermes-plugin.config`;
-  - keep host-owned `allow_tool_override` outside runtime config;
-  - apply defaults without requiring YAML `null`;
-  - validate `human_preset` as `default` or `careful`;
-  - normalize omitted/empty optional strings as unset;
-  - warn/no-op `geoip: true` when no `proxy` is set;
-  - translate plugin config into SDK launch arguments including `args`.
-- Live repo status observed during this handoff: branch `feature/direct-sdk-foundation`; `test_plugin.py` modified; `PLAN.md` and `config.py` untracked. This handoff did not inspect or validate those implementation edits.
+5. Therefore, the most likely remaining blockers for Reddit/login flows are:
+   - deeper headless fingerprint coherence beyond UA alone
+   - challenge completion behavior that still is not live-verified end to end
+   - missing headed viewport parity when native/headed coherence depends on screen-derived sizing
 
-## Blockers / open decisions
+See `PLAN.md`, section `Evidence-based Anti-Bot Inventory (2026-07-15 refresh)` for the source-backed comparison.
 
-- Exact dependency packaging model for the `cloakbrowser` SDK remains undecided.
-- Exact Hermes plugin API for task/session identity must be verified before finalizing the logical state boundary.
-- Decide whether downloads/evaluate need user-visible plugin support or remain internal/unsupported.
-- Decide and document whether `browser_vision` stays native or later gets screenshot-based CloakBrowser support.
-- Decide and document whether `browser_cdp` stays native/unsupported or gets a tested CloakBrowser CDP path.
-- `human_config` is deferred until accepted fields and runtime behavior are tested in this plugin.
-- Existing `README.md` and `INSTALL.md` still describe MCP setup and must be rewritten as part of docs rollout; do not use them as target-state instructions.
+## Separate tracked bug
 
-## Next steps
+User reported a separate post-session exit bug after sessions that used the Cloak plugin:
 
-1. Preserve this `STATUS.md` as context before further implementation.
-2. Let the active implementation worker finish or coordinate before editing the same files.
-3. Review current diffs in `test_plugin.py`, `config.py`, and `PLAN.md` before making additional code changes.
-4. Complete/confirm Phase 0 facts if not already done: current Hermes plugin APIs, browser schemas, installed `cloakbrowser` SDK APIs, dependency approach, and task/session identity availability.
-5. Implement only the planned config/dependency foundation slice first; do not broaden into tool parity or lifecycle races until foundation tests pass.
-6. Before claiming completion, produce real passing output for relevant unit tests, lifecycle/race tests, same-profile sharing, cross-profile distinct-directory isolation, live direct-SDK temporary-profile smoke, and static checks as listed in `PLAN.md`.
+- unhandled Node `EPIPE`
+- thrown after Hermes exits back to shell
+- Node.js v24.17.0
+
+This is tracked separately from anti-bot work. It looks like CLI/session shutdown plumbing, not browser stealth logic.
+
+## Tooling note
+
+- Initial audit fell back to direct reads because CodeGraph was temporarily unavailable; later review confirmed the indexed repo state.
+- Audit evidence in this handoff therefore comes from `read_file`, `search_files`, `terminal git show`, live runtime checks already performed in-session, and later CodeGraph re-checks.
+
+## Recommended next implementation slice
+
+1. Run live Reddit/login verification now that smart navigate and click retry are in place.
+2. Add or prove headed viewport auto-detect parity.
+3. Keep `fingerprint_seed` docs/tests aligned with the current `--fingerprint=<seed>` pass-through behavior.
+4. Run a live fingerprint audit checklist for headless mode before claiming Reddit parity.
+5. Investigate the separate Node `EPIPE` shutdown bug in Hermes core/CLI plumbing.
