@@ -43,7 +43,7 @@ class CloakConfig:
         options: dict[str, Any] = {
             "user_data_dir": self.user_data_dir,
             "headless": self.headless,
-            "chromiumSandbox": self.chromium_sandbox,
+            "chromium_sandbox": self.chromium_sandbox,
             "humanize": self.humanize,
             "human_preset": self.human_preset,
             "stealth_args": self.stealth_args,
