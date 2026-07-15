@@ -340,23 +340,47 @@ class CloakBrowserAdapter:
         self._acknowledge_sdk_banner()
         sdk = importlib.import_module("cloakbrowser")
         options = self.settings.to_sdk_options()
-        for name in ("create", "launch_persistent_context"):
+        launch_options = {
+            key: value for key, value in options.items() if key != "user_data_dir"
+        }
+
+        launch_candidates: list[tuple[str, dict[str, Any]]] = []
+        if "user_data_dir" in options:
+            launch_candidates.extend(
+                [
+                    ("launch_persistent_context_async", options),
+                    ("launch_persistent_context", options),
+                ]
+            )
+        launch_candidates.extend(
+            [
+                ("launch_async", launch_options),
+                ("launch", launch_options),
+            ]
+        )
+
+        for name, candidate_options in launch_candidates:
             factory = getattr(sdk, name, None)
             if callable(factory):
-                return self._run_with_owner(owner, lambda factory=factory: factory(**options))
-        launch = getattr(sdk, "launch", None)
-        if callable(launch):
-            launch_options = {
-                key: value for key, value in options.items() if key != "user_data_dir"
-            }
-            return self._run_with_owner(owner, lambda launch=launch: launch(**launch_options))
+                return self._run_with_owner(
+                    owner,
+                    lambda factory=factory, candidate_options=candidate_options: factory(
+                        **candidate_options
+                    ),
+                )
+
+        create = getattr(sdk, "create", None)
+        if callable(create):
+            return self._run_with_owner(owner, lambda: create(**options))
         browser_cls = getattr(sdk, "CloakBrowser", None) or getattr(
             sdk, "Browser", None
         )
         if browser_cls is not None:
             instance = self._run_with_owner(owner, lambda: browser_cls(**options))
             for method in (
+                "launch_persistent_context_async",
                 "launch_persistent_context",
+                "launch_async",
                 "new_context",
                 "context",
                 "start",
@@ -641,10 +665,15 @@ class CloakBrowserAdapter:
 
         focus = getattr(locator, "focus", None)
         click = getattr(locator, "click", None)
-        if callable(focus):
+        clicked = False
+        if callable(click):
+            try:
+                self.run(click())
+                clicked = True
+            except Exception:
+                clicked = False
+        if not clicked and callable(focus):
             self.run(focus())
-        elif callable(click):
-            self.run(click())
         self._human_pause(0.08, 0.25)
 
         if clear:
@@ -654,16 +683,13 @@ class CloakBrowserAdapter:
             self.run(page.keyboard.press("Backspace"))
             self._human_pause(0.05, 0.18)
 
-        press_seq = getattr(locator, "press_sequentially", None)
-        if callable(press_seq):
-            self.run(press_seq(text))
-        else:
-            for index, char in enumerate(text):
-                self.run(page.keyboard.type(char))
-                if char in " .,;:/-" or (index and index % random.randint(7, 14) == 0):
-                    self._human_pause(0.03, 0.16)
-                else:
-                    self._human_pause(safe_min / 1000.0, safe_max / 1000.0)
+        for index, char in enumerate(text):
+            delay_ms = random.randint(safe_min, safe_max)
+            self.run(page.keyboard.type(char, delay=delay_ms))
+            if char in " .,;:/-" or (index and index % random.randint(7, 14) == 0):
+                self._human_pause(0.03, 0.16)
+            else:
+                self._human_pause(safe_min / 1000.0, safe_max / 1000.0)
 
         if submit:
             self._human_pause(0.12, 0.35)

@@ -156,6 +156,8 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
                         "locale": None,
                         "timezone": "UTC",
                         "fingerprint_seed": "seed-123",
+                        "viewport_width": 1440,
+                        "viewport_height": 900,
                         "args": ["--disable-gpu"],
                         "auto_acknowledge_banner": False,
                         "auto_update": False,
@@ -178,6 +180,8 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
     assert parsed.settings.locale is None
     assert parsed.settings.timezone == "UTC"
     assert parsed.settings.fingerprint_seed == "seed-123"
+    assert parsed.settings.viewport_width == 1440
+    assert parsed.settings.viewport_height == 900
     assert parsed.settings.args == ["--disable-gpu"]
     assert parsed.settings.auto_acknowledge_banner is False
     assert parsed.settings.auto_update is False
@@ -185,8 +189,18 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
         "--disable-gpu",
         "--fingerprint=seed-123",
     ]
+    assert parsed.settings.to_sdk_options()["viewport"] == {"width": 1440, "height": 900}
     assert "allow_tool_override" not in parsed.settings.to_sdk_options()
     assert "geoip requires proxy" in "; ".join(parsed.warnings)
+
+
+def test_config_omits_viewport_by_default_for_sdk_parity(plugin, tmp_path):
+    parsed = plugin.config.load_config(FakeCtx({"user_data_dir": str(tmp_path / "profile")}))
+
+    assert parsed.valid is True
+    assert parsed.settings.viewport_width is None
+    assert parsed.settings.viewport_height is None
+    assert "viewport" not in parsed.settings.to_sdk_options()
 
 
 def test_config_parses_stringified_empty_args_list(plugin, tmp_path):
@@ -644,6 +658,7 @@ class FakeElement:
         self.page = page
         self.selector = selector
         self.click_calls = []
+        self.press_sequentially_calls = []
 
     def click(self, timeout=None):
         self.click_calls.append(timeout)
@@ -661,6 +676,7 @@ class FakeElement:
         self.page.events.append(("fill", self.selector, text))
 
     def press_sequentially(self, text):
+        self.press_sequentially_calls.append(text)
         for char in text:
             self.page.events.append(("press", char))
 
@@ -680,7 +696,8 @@ class FakeKeyboard:
     def press(self, key):
         self.page.events.append(("press", key))
 
-    def type(self, text):
+    def type(self, text, delay=None):
+        self.page.keyboard_type_calls.append((text, delay))
         for char in text:
             self.page.events.append(("press", char))
 
@@ -717,6 +734,8 @@ class FakePage:
         self.events = []
         self.click_calls = []
         self.click_failures = {}
+        self.keyboard_type_calls = []
+        self.locators = {}
         self.closed_flag = False
         self.mouse = FakeMouse(self)
         self.keyboard = FakeKeyboard(self)
@@ -784,10 +803,10 @@ class FakePage:
         return self.title_value
 
     def locator(self, selector):
-        return FakeElement(self, selector)
+        return self.locators.setdefault(selector, FakeElement(self, selector))
 
     def query_selector(self, selector):
-        return FakeElement(self, selector)
+        return self.locators.setdefault(selector, FakeElement(self, selector))
 
     def go_back(self):
         self.events.append(("back",))
@@ -923,6 +942,8 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
                         "humanize": False,
                         "stealth_args": False,
                         "fingerprint_seed": "runtime-seed",
+                        "viewport_width": 1600,
+                        "viewport_height": 900,
                         "args": [],
                         "auto_acknowledge_banner": False,
                         "auto_update": False,
@@ -959,6 +980,7 @@ def test_register_loads_falsey_runtime_config_from_hermes_config(plugin, monkeyp
     assert FakeBrowserContext.created[-1].options["humanize"] is False
     assert FakeBrowserContext.created[-1].options["stealth_args"] is False
     assert FakeBrowserContext.created[-1].options["user_data_dir"] == str(profile.resolve())
+    assert FakeBrowserContext.created[-1].options["viewport"] == {"width": 1600, "height": 900}
     assert FakeBrowserContext.created[-1].options["args"] == ["--fingerprint=runtime-seed"]
     assert os.environ["CLOAKBROWSER_AUTO_UPDATE"] == "false"
 
@@ -997,7 +1019,64 @@ def test_register_parses_stringified_runtime_args_from_hermes_config(
     assert parsed.valid is True
     assert parsed.settings.args == ["--no-sandbox"]
     assert result["url"] == "about:blank"
+    assert "viewport" not in FakeBrowserContext.created[-1].options
     assert FakeBrowserContext.created[-1].options["args"] == ["--no-sandbox"]
+
+
+def test_adapter_create_context_prefers_direct_persistent_launch_before_create(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    calls = []
+
+    async def launch_persistent_context_async(**options):
+        calls.append(("launch_persistent_context_async", options))
+        return FakeBrowserContext(**options)
+
+    def create(**options):
+        calls.append(("create", options))
+        return FakeBrowserContext(**options)
+
+    setattr(fake_sdk, "launch_persistent_context_async", launch_persistent_context_async)
+    setattr(fake_sdk, "create", create)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    settings = plugin.config.load_config(
+        FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    ).settings
+
+    context = plugin.adapter.CloakBrowserAdapter(settings).create_context()
+
+    assert isinstance(context, plugin.adapter._OwnedSDKProxy)
+    assert [name for name, _options in calls] == ["launch_persistent_context_async"]
+    assert calls[0][1]["user_data_dir"] == str((tmp_path / "profile").resolve())
+
+
+def test_adapter_create_context_falls_back_to_launch_async_before_create(
+    plugin, monkeypatch, tmp_path
+):
+    fake_sdk = types.ModuleType("cloakbrowser")
+    calls = []
+
+    async def launch_async(**options):
+        calls.append(("launch_async", options))
+        return FakeBrowserContext(**options)
+
+    def create(**options):
+        calls.append(("create", options))
+        return FakeBrowserContext(**options)
+
+    setattr(fake_sdk, "launch_async", launch_async)
+    setattr(fake_sdk, "create", create)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    settings = plugin.config.load_config(
+        FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    ).settings
+
+    context = plugin.adapter.CloakBrowserAdapter(settings).create_context()
+
+    assert isinstance(context, plugin.adapter._OwnedSDKProxy)
+    assert [name for name, _options in calls] == ["launch_async"]
+    assert "user_data_dir" not in calls[0][1]
 
 
 def test_runtime_auto_update_env_var_wins(plugin, monkeypatch, tmp_path):
@@ -1259,7 +1338,7 @@ def test_browser_snapshot_dom_fallback_refs_support_click_and_type(plugin, monke
     assert clicked["clicked"] is True
     assert typed["typed"] is True
     assert ("click", "#dom-go") in page.events
-    assert ("focus", "#dom-input") in page.events
+    assert ("click", "#dom-input") in page.events
     assert ("fill", "#dom-input", "abc") not in page.events
     assert [event for event in page.events if event[0] == "press" and len(event[1]) == 1] == [
         ("press", "a"),
@@ -1301,7 +1380,7 @@ def test_browser_click_raises_after_single_retry(plugin, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("submit", [False, True])
-def test_browser_type_humanized_auth_interaction_uses_focus_keyboard_clear_and_optional_submit(
+def test_browser_type_humanized_auth_interaction_clicks_first_types_per_char_with_delay_and_optional_submit(
     plugin, monkeypatch, tmp_path, submit
 ):
     handlers = _registered_browser_tools_with_config(
@@ -1314,6 +1393,7 @@ def test_browser_type_humanized_auth_interaction_uses_focus_keyboard_clear_and_o
             "humanize": True,
         },
     )
+    monkeypatch.setattr(plugin.adapter.random, "randint", lambda low, high: low)
     handlers["browser_navigate"]({"url": "https://example.test/login"}, task_id="human-auth")
     page = FakeBrowserContext.created[0].pages[0]
 
@@ -1324,9 +1404,11 @@ def test_browser_type_humanized_auth_interaction_uses_focus_keyboard_clear_and_o
         )
     )
     typing_events = page.events[1:]
+    locator = page.locators["#password"]
 
     assert result["typed"] is True
-    assert typing_events[0] in {("focus", "#password"), ("click", "#password")}
+    assert typing_events[0] == ("click", "#password")
+    assert ("focus", "#password") not in typing_events
     assert ("fill", "#password", "abc") not in typing_events
     assert any(event in typing_events for event in [("press", "Control+A"), ("press", "Meta+A")])
     assert any(event in typing_events for event in [("press", "Backspace"), ("press", "Delete")])
@@ -1335,7 +1417,38 @@ def test_browser_type_humanized_auth_interaction_uses_focus_keyboard_clear_and_o
         ("press", "b"),
         ("press", "c"),
     ]
+    assert locator.press_sequentially_calls == []
+    assert page.keyboard_type_calls == [("a", result["min_delay_ms"]), ("b", result["min_delay_ms"]), ("c", result["min_delay_ms"])]
     assert (("press", "Enter") in typing_events) is submit
+
+
+def test_browser_type_humanized_falls_back_to_focus_when_click_fails(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools_with_config(
+        plugin,
+        monkeypatch,
+        tmp_path,
+        {
+            "user_data_dir": str(tmp_path / "profile"),
+            "headless": True,
+            "humanize": True,
+        },
+    )
+    monkeypatch.setattr(plugin.adapter.random, "randint", lambda low, high: low)
+    handlers["browser_navigate"]({"url": "https://example.test/login"}, task_id="human-auth-click-fallback")
+    page = FakeBrowserContext.created[0].pages[0]
+    page.click_failures["#password"] = 1
+
+    result = json.loads(
+        handlers["browser_type"](
+            {"selector": "#password", "text": "abc"},
+            task_id="human-auth-click-fallback",
+        )
+    )
+    typing_events = page.events[1:]
+
+    assert result["typed"] is True
+    assert typing_events[:2] == [("focus", "#password"), ("press", "Control+A")]
+    assert page.click_calls == [("#password", None)]
 
 
 def test_browser_type_non_humanized_path_keeps_direct_fill(plugin, monkeypatch, tmp_path):
@@ -1672,7 +1785,7 @@ def test_browser_click_and_type_use_generated_dom_fallback_refs(
     assert clicked["clicked"] is True
     assert typed["typed"] is True
     assert ("click", "#dom-go") in page.events
-    assert ("focus", "#dom-input") in page.events
+    assert ("click", "#dom-input") in page.events
     assert ("fill", "#dom-input", "abc") not in page.events
     assert [event for event in page.events if event[0] == "press" and len(event[1]) == 1] == [
         ("press", "a"),
@@ -2876,8 +2989,8 @@ def test_session_id_and_task_id_pages_are_isolated(plugin, monkeypatch, tmp_path
     session_page = FakeBrowserContext.created[0].pages[1]
     assert task_page.url == "https://example.test/task"
     assert session_page.url == "https://example.test/session"
-    assert ("focus", "#q") in task_page.events
-    assert ("focus", "#q") in session_page.events
+    assert ("click", "#q") in task_page.events
+    assert ("click", "#q") in session_page.events
     assert ("fill", "#q", "task-text") not in task_page.events
     assert ("fill", "#q", "session-text") not in session_page.events
     assert [event for event in task_page.events if event[0] == "press" and len(event[1]) == 1] == [

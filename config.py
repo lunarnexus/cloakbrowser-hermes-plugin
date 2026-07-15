@@ -21,6 +21,8 @@ class CloakConfig:
     human_preset: str = "default"
     stealth_args: bool = True
     geoip: bool = False
+    viewport_width: int | None = None
+    viewport_height: int | None = None
     args: list[str] = field(default_factory=list)
     fingerprint_seed: str | None = None
     proxy: str | None = None
@@ -46,6 +48,11 @@ class CloakConfig:
             "geoip": self.geoip,
             "args": args,
         }
+        if self.viewport_width is not None and self.viewport_height is not None:
+            options["viewport"] = {
+                "width": self.viewport_width,
+                "height": self.viewport_height,
+            }
         for key in _OPTIONAL_STRINGS:
             value = getattr(self, key)
             if value is not None:
@@ -190,6 +197,26 @@ def _parse_optional_bool(raw: Any, name: str, errors: list[str]) -> bool | None:
     return None
 
 
+def _parse_positive_int(raw: Any, default: int, name: str, errors: list[str]) -> int:
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        errors.append(f"{name} must be a positive integer")
+        return default
+    if value <= 0:
+        errors.append(f"{name} must be a positive integer")
+        return default
+    return value
+
+
+def _parse_optional_positive_int(raw: Any, name: str, errors: list[str]) -> int | None:
+    if raw is None:
+        return None
+    return _parse_positive_int(raw, 1, name, errors)
+
+
 def _is_relative_to(path: Path, base: Path) -> bool:
     try:
         path.relative_to(base)
@@ -289,6 +316,12 @@ def load_config(ctx: Any) -> ConfigResult:
         human_preset=preset,
         stealth_args=_parse_bool(raw.get("stealth_args"), True, "stealth_args", errors),
         geoip=geoip,
+        viewport_width=_parse_optional_positive_int(
+            raw.get("viewport_width"), "viewport_width", errors
+        ),
+        viewport_height=_parse_optional_positive_int(
+            raw.get("viewport_height"), "viewport_height", errors
+        ),
         args=list(args),
         fingerprint_seed=fingerprint_seed,
         auto_acknowledge_banner=_parse_bool(
