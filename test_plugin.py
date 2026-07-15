@@ -558,8 +558,15 @@ class FakeElement:
     def click(self):
         self.page.events.append(("click", self.selector))
 
+    def focus(self):
+        self.page.events.append(("focus", self.selector))
+
     def fill(self, text):
         self.page.events.append(("fill", self.selector, text))
+
+    def press_sequentially(self, text):
+        for char in text:
+            self.page.events.append(("press", char))
 
 
 class FakeMouse:
@@ -576,6 +583,10 @@ class FakeKeyboard:
 
     def press(self, key):
         self.page.events.append(("press", key))
+
+    def type(self, text):
+        for char in text:
+            self.page.events.append(("press", char))
 
 
 class FakeAccessibility:
@@ -951,6 +962,17 @@ def _registered_browser_tools(plugin, monkeypatch, tmp_path):
     return {tool["name"]: tool["handler"] for tool in ctx.registered_tools}
 
 
+def _registered_browser_tools_with_config(plugin, monkeypatch, tmp_path, config):
+    FakeBrowserContext.created.clear()
+    FakeBrowserContext.closed.clear()
+    fake_sdk = types.ModuleType("cloakbrowser")
+    fake_sdk.create = lambda **options: FakeBrowserContext(**options)
+    monkeypatch.setitem(sys.modules, "cloakbrowser", fake_sdk)
+    ctx = FakeCtx(config)
+    plugin.register(ctx)
+    return {tool["name"]: tool["handler"] for tool in ctx.registered_tools}
+
+
 def test_browser_handlers_perform_direct_sdk_operations(plugin, monkeypatch, tmp_path):
     handlers = _registered_browser_tools(plugin, monkeypatch, tmp_path)
 
@@ -1073,7 +1095,78 @@ def test_browser_snapshot_dom_fallback_refs_support_click_and_type(plugin, monke
     assert clicked["clicked"] is True
     assert typed["typed"] is True
     assert ("click", "#dom-go") in page.events
-    assert ("fill", "#dom-input", "abc") in page.events
+    assert ("focus", "#dom-input") in page.events
+    assert ("fill", "#dom-input", "abc") not in page.events
+    assert [event for event in page.events if event[0] == "press" and len(event[1]) == 1] == [
+        ("press", "a"),
+        ("press", "b"),
+        ("press", "c"),
+    ]
+
+
+@pytest.mark.parametrize("submit", [False, True])
+def test_browser_type_humanized_auth_interaction_uses_focus_keyboard_clear_and_optional_submit(
+    plugin, monkeypatch, tmp_path, submit
+):
+    handlers = _registered_browser_tools_with_config(
+        plugin,
+        monkeypatch,
+        tmp_path,
+        {
+            "user_data_dir": str(tmp_path / "profile"),
+            "headless": True,
+            "humanize": True,
+        },
+    )
+    handlers["browser_navigate"]({"url": "https://example.test/login"}, task_id="human-auth")
+    page = FakeBrowserContext.created[0].pages[0]
+
+    result = json.loads(
+        handlers["browser_type"](
+            {"selector": "#password", "text": "abc", "submit": submit},
+            task_id="human-auth",
+        )
+    )
+    typing_events = page.events[1:]
+
+    assert result["typed"] is True
+    assert typing_events[0] in {("focus", "#password"), ("click", "#password")}
+    assert ("fill", "#password", "abc") not in typing_events
+    assert any(event in typing_events for event in [("press", "Control+A"), ("press", "Meta+A")])
+    assert any(event in typing_events for event in [("press", "Backspace"), ("press", "Delete")])
+    assert [event for event in typing_events if event[0] == "press" and len(event[1]) == 1] == [
+        ("press", "a"),
+        ("press", "b"),
+        ("press", "c"),
+    ]
+    assert (("press", "Enter") in typing_events) is submit
+
+
+def test_browser_type_non_humanized_path_keeps_direct_fill(plugin, monkeypatch, tmp_path):
+    handlers = _registered_browser_tools_with_config(
+        plugin,
+        monkeypatch,
+        tmp_path,
+        {
+            "user_data_dir": str(tmp_path / "profile"),
+            "headless": True,
+            "humanize": False,
+        },
+    )
+    handlers["browser_navigate"]({"url": "https://example.test/login"}, task_id="direct-auth")
+    page = FakeBrowserContext.created[0].pages[0]
+
+    result = json.loads(
+        handlers["browser_type"](
+            {"selector": "#password", "text": "abc"},
+            task_id="direct-auth",
+        )
+    )
+
+    assert result["typed"] is True
+    assert ("fill", "#password", "abc") in page.events
+    assert all(event != ("press", "Enter") for event in page.events)
+    assert all(event[0] not in {"focus", "click"} for event in page.events)
 
 
 def test_browser_dialog_captures_bounded_dialogs_and_actions(plugin, monkeypatch, tmp_path):
@@ -1274,7 +1367,13 @@ def test_browser_click_and_type_use_generated_dom_fallback_refs(
     assert clicked["clicked"] is True
     assert typed["typed"] is True
     assert ("click", "#dom-go") in page.events
-    assert ("fill", "#dom-input", "abc") in page.events
+    assert ("focus", "#dom-input") in page.events
+    assert ("fill", "#dom-input", "abc") not in page.events
+    assert [event for event in page.events if event[0] == "press" and len(event[1]) == 1] == [
+        ("press", "a"),
+        ("press", "b"),
+        ("press", "c"),
+    ]
 
 
 def test_browser_vision_dom_fallback_blocks_private_page_before_dom_read(
@@ -2364,8 +2463,16 @@ def test_session_id_and_task_id_pages_are_isolated(plugin, monkeypatch, tmp_path
     session_page = FakeBrowserContext.created[0].pages[1]
     assert task_page.url == "https://example.test/task"
     assert session_page.url == "https://example.test/session"
-    assert ("fill", "#q", "task-text") in task_page.events
-    assert ("fill", "#q", "session-text") in session_page.events
+    assert ("focus", "#q") in task_page.events
+    assert ("focus", "#q") in session_page.events
+    assert ("fill", "#q", "task-text") not in task_page.events
+    assert ("fill", "#q", "session-text") not in session_page.events
+    assert [event for event in task_page.events if event[0] == "press" and len(event[1]) == 1] == [
+        *( ("press", char) for char in "task-text" )
+    ]
+    assert [event for event in session_page.events if event[0] == "press" and len(event[1]) == 1] == [
+        *( ("press", char) for char in "session-text" )
+    ]
     assert "session-text" not in json.dumps(task_page.events)
     assert "task-text" not in json.dumps(session_page.events)
 

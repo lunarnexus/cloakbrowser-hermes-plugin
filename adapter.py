@@ -8,8 +8,10 @@ import inspect
 import ipaddress
 import json
 import os
+import random
 import re
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -446,12 +448,91 @@ class CloakBrowserAdapter:
     def _type(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
         locator = self._locator(page, self._selector(args))
         text = str(args.get("text", ""))
+        submit = bool(args.get("submit", False))
+        settings = self.manager.settings if self.manager is not None else None
+        humanize = bool(args.get("humanize", settings.humanize if settings is not None else True))
+        min_delay_ms = self._coerce_delay(args.get("min_delay_ms"), default=35)
+        max_delay_ms = self._coerce_delay(args.get("max_delay_ms"), default=140)
+        if humanize:
+            detail = self._humanized_type(
+                page,
+                locator,
+                text,
+                clear=bool(args.get("clear", True)),
+                submit=submit,
+                min_delay_ms=min_delay_ms,
+                max_delay_ms=max_delay_ms,
+            )
+            return {"typed": True, **detail}
         fill = getattr(locator, "fill", None)
         if callable(fill):
             self.run(fill(text))
         else:
             self.run(locator.type(text))
-        return {"typed": True}
+        if submit:
+            self.run(page.keyboard.press("Enter"))
+        return {"typed": True, "mode": "direct", "submitted": submit}
+
+    def _coerce_delay(self, value: Any, *, default: int) -> int:
+        try:
+            delay = int(default if value is None else value)
+        except (TypeError, ValueError):
+            delay = default
+        return max(10, min(delay, 1500))
+
+    def _humanized_type(
+        self,
+        page: Any,
+        locator: Any,
+        text: str,
+        *,
+        clear: bool,
+        submit: bool,
+        min_delay_ms: int,
+        max_delay_ms: int,
+    ) -> dict[str, Any]:
+        safe_min = min(min_delay_ms, max_delay_ms)
+        safe_max = max(min_delay_ms, max_delay_ms)
+
+        focus = getattr(locator, "focus", None)
+        click = getattr(locator, "click", None)
+        if callable(focus):
+            self.run(focus())
+        elif callable(click):
+            self.run(click())
+        self._human_pause(0.08, 0.25)
+
+        if clear:
+            clear_combo = "Meta+A" if sys.platform == "darwin" else "Control+A"
+            self.run(page.keyboard.press(clear_combo))
+            self._human_pause(0.03, 0.12)
+            self.run(page.keyboard.press("Backspace"))
+            self._human_pause(0.05, 0.18)
+
+        press_seq = getattr(locator, "press_sequentially", None)
+        if callable(press_seq):
+            self.run(press_seq(text))
+        else:
+            for index, char in enumerate(text):
+                self.run(page.keyboard.type(char))
+                if char in " .,;:/-" or (index and index % random.randint(7, 14) == 0):
+                    self._human_pause(0.03, 0.16)
+                else:
+                    self._human_pause(safe_min / 1000.0, safe_max / 1000.0)
+
+        if submit:
+            self._human_pause(0.12, 0.35)
+            self.run(page.keyboard.press("Enter"))
+
+        return {
+            "mode": "humanized",
+            "submitted": submit,
+            "min_delay_ms": safe_min,
+            "max_delay_ms": safe_max,
+        }
+
+    def _human_pause(self, low: float, high: float) -> None:
+        time.sleep(random.uniform(low, high))
 
     def _scroll(self, page: Any, args: dict[str, Any]) -> dict[str, Any]:
         direction = str(args.get("direction", "down")).lower()
