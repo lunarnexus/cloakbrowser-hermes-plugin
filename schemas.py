@@ -20,6 +20,25 @@ BROWSER_TOOL_NAMES = [
 ]
 
 FALLBACK_SCHEMAS = {
+    "browser_type": {
+        "name": "browser_type",
+        "description": "Type text into an input or editable element. Accepts either a snapshot ref like '@e2' or a CSS selector. In humanized mode it focuses the field, clears via keyboard, types with uneven delays, and can optionally submit with Enter.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "Snapshot ref such as '@e2'."},
+                "selector": {"type": "string", "description": "CSS selector when no snapshot ref is available."},
+                "text": {"type": "string", "description": "The text to type into the field."},
+                "submit": {"type": "boolean", "default": False, "description": "Press Enter after typing."},
+                "clear": {"type": "boolean", "default": True, "description": "Clear existing text before typing."},
+                "humanize": {"type": "boolean", "description": "Override config and force humanized or direct typing for this call."},
+                "min_delay_ms": {"type": "integer", "description": "Minimum per-character delay for humanized typing."},
+                "max_delay_ms": {"type": "integer", "description": "Maximum per-character delay for humanized typing."},
+            },
+            "required": ["text"],
+            "anyOf": [{"required": ["ref"]}, {"required": ["selector"]}],
+        },
+    },
     "browser_dialog": {
         "name": "browser_dialog",
         "parameters": {
@@ -46,4 +65,6 @@ FALLBACK_SCHEMAS = {
 
 
 def schema_for(name: str) -> dict:
-    return BROWSER_SCHEMAS.get(name, FALLBACK_SCHEMAS.get(name, {"name": name, "parameters": {"type": "object"}}))
+    if name in FALLBACK_SCHEMAS:
+        return FALLBACK_SCHEMAS[name]
+    return BROWSER_SCHEMAS.get(name, {"name": name, "parameters": {"type": "object"}})
