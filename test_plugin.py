@@ -36,7 +36,7 @@ BROWSER_NAMES = [
 def test_manifest_declares_enable_time_config_defaults():
     manifest = yaml.safe_load(Path(__file__).with_name("plugin.yaml").read_text())
 
-    assert manifest["manifest_version"] == 2
+    assert manifest["manifest_version"] == 1
     assert manifest["config_defaults"] == {
         "user_data_dir": {"$profile_path": "browser-profiles/cloakbrowser"},
         "headless": False,

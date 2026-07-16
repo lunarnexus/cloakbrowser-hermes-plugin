@@ -20,7 +20,7 @@ Do not treat a generic `python3` import check as proof that Hermes can import th
 
 ## 2) Install the Hermes plugin
 
-This plugin requires Hermes plugin manifest version 2 support so enablement can initialize profile-scoped defaults.
+Hermes versions with `config_defaults` support initialize profile-scoped defaults during enablement. Older Hermes versions can still install the plugin and safely ignore those optional defaults.
 
 Preferred install path:
 

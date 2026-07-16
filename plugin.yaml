@@ -1,5 +1,5 @@
 name: cloakbrowser-hermes-plugin
-manifest_version: 2
+manifest_version: 1
 version: 0.1.0
 description: "Direct-SDK CloakBrowser foundation for Hermes browser_* tool overrides."
 author: LunarNexus

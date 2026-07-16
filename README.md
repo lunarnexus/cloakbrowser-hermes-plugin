@@ -67,7 +67,7 @@ Start a new Hermes session after install or update.
 
 ## Configuration
 
-When the plugin is enabled, Hermes adds the manifest's recommended defaults to the active profile's plugin entry. Existing keys are never replaced, and the generated five-digit fingerprint seed is reused on later enable or update operations. This requires Hermes plugin manifest version 2 support.
+When the plugin is enabled, Hermes versions with `config_defaults` support add the manifest's recommended defaults to the active profile's plugin entry. Existing keys are never replaced, and the generated five-digit fingerprint seed is reused on later enable or update operations. Older Hermes versions safely ignore these optional manifest defaults.
 
 The resulting configuration can be customized under the plugin entry:
 
