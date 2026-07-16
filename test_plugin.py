@@ -15,7 +15,6 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-import yaml
 
 
 BROWSER_NAMES = [
@@ -31,24 +30,6 @@ BROWSER_NAMES = [
     "browser_dialog",
     "browser_vision",
 ]
-
-
-def test_manifest_declares_enable_time_config_defaults():
-    manifest = yaml.safe_load(Path(__file__).with_name("plugin.yaml").read_text())
-
-    assert manifest["manifest_version"] == 1
-    assert manifest["config_defaults"] == {
-        "user_data_dir": {"$profile_path": "browser-profiles/cloakbrowser"},
-        "headless": False,
-        "humanize": True,
-        "human_preset": "careful",
-        "stealth_args": True,
-        "fingerprint_seed": {"$random_digits": 5},
-        "geoip": False,
-        "args": [],
-    }
-
-
 class FakeCtx:
     def __init__(self, config=None):
         self.config = config
@@ -237,6 +218,27 @@ def test_config_inherits_hermes_timezone_when_plugin_omits_it(plugin, tmp_path):
 
     assert parsed.valid is True
     assert parsed.settings.timezone == "America/Indiana/Indianapolis"
+
+
+
+def test_config_inherits_hermes_locale_when_plugin_omits_it(plugin, tmp_path):
+    parsed = plugin.config.load_config(
+        FakeCtx(
+            {
+                "locale": "en-US",
+                "plugins": {
+                    "entries": {
+                        "cloakbrowser-hermes-plugin": {
+                            "config": {"user_data_dir": str(tmp_path / "profile")}
+                        }
+                    }
+                },
+            }
+        )
+    )
+
+    assert parsed.valid is True
+    assert parsed.settings.locale == "en-US"
 
 
 def test_config_omits_viewport_by_default_for_sdk_parity(plugin, tmp_path):

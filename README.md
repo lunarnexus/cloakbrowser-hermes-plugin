@@ -67,9 +67,7 @@ Start a new Hermes session after install or update.
 
 ## Configuration
 
-When the plugin is enabled, Hermes versions with `config_defaults` support add the manifest's recommended defaults to the active profile's plugin entry. Existing keys are never replaced, and the generated five-digit fingerprint seed is reused on later enable or update operations. Older Hermes versions safely ignore these optional manifest defaults.
-
-The resulting configuration can be customized under the plugin entry:
+Configure runtime options under the plugin entry:
 
 ```yaml
 plugins:
@@ -81,13 +79,13 @@ plugins:
         user_data_dir: ~/.hermes/profiles/<profile>/browser-profiles/cloakbrowser
         headless: false
         humanize: true
-        human_preset: careful
+        human_preset: default
         stealth_args: true
         geoip: false
         # Optional fingerprint identity seed. Current plugin maps this to
         # args: ["--fingerprint=<seed>"] because current public Python docs do
         # not document a first-class fingerprint_seed launch kwarg.
-        fingerprint_seed: "12345"
+        # fingerprint_seed: "stable-profile-a"
         args: []
         # Optional strings: omit when unset.
         # proxy: ""

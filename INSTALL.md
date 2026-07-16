@@ -20,8 +20,6 @@ Do not treat a generic `python3` import check as proof that Hermes can import th
 
 ## 2) Install the Hermes plugin
 
-Hermes versions with `config_defaults` support initialize profile-scoped defaults during enablement. Older Hermes versions can still install the plugin and safely ignore those optional defaults.
-
 Preferred install path:
 
 ```bash
@@ -46,7 +44,7 @@ Start a new Hermes session after install or update.
 
 ## 3) Configure plugin options
 
-Hermes fills missing values under `plugins.entries.cloakbrowser-hermes-plugin.config` when the plugin is enabled. Customize them there as needed:
+Configure under `plugins.entries.cloakbrowser-hermes-plugin.config`:
 
 ```yaml
 plugins:
@@ -58,13 +56,13 @@ plugins:
         user_data_dir: ~/.hermes/profiles/<profile>/browser-profiles/cloakbrowser
         headless: false
         humanize: true
-        human_preset: careful
+        human_preset: default
         stealth_args: true
         geoip: false
         # Optional fingerprint identity seed. Current plugin maps this to
         # args: ["--fingerprint=<seed>"] because current public Python docs do
         # not document a first-class fingerprint_seed launch kwarg.
-        fingerprint_seed: "12345"
+        # fingerprint_seed: "stable-profile-a"
         args: []
         # Optional strings: omit when unset.
         # proxy: ""

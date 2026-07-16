@@ -1,5 +1,4 @@
 name: cloakbrowser-hermes-plugin
-manifest_version: 1
 version: 0.1.0
 description: "Direct-SDK CloakBrowser foundation for Hermes browser_* tool overrides."
 author: LunarNexus
@@ -18,14 +17,3 @@ provides_tools:
   - browser_vision
 provides_hooks: []
 requires_env: []
-config_defaults:
-  user_data_dir:
-    $profile_path: browser-profiles/cloakbrowser
-  headless: false
-  humanize: true
-  human_preset: careful
-  stealth_args: true
-  fingerprint_seed:
-    $random_digits: 5
-  geoip: false
-  args: []
