@@ -37,7 +37,7 @@ For the detailed evidence-backed comparison, see `PLAN.md`, section `Evidence-ba
 ## Requirements
 
 1. Hermes Agent, obviously.
-2. The CloakBrowser Python SDK installed in the Hermes venv: `python -m pip install cloakbrowser`.
+2. CloakBrowser 0.4.10 or newer installed in the Hermes venv: `python -m pip install 'cloakbrowser>=0.4.10'`.
    Package reference: https://pypi.org/project/cloakbrowser/ (`CloakHQ/CloakBrowser`).
 3. A local desktop session for future browser sessions (headless=false).
 
@@ -67,7 +67,9 @@ Start a new Hermes session after install or update.
 
 ## Configuration
 
-Configure runtime options under the plugin entry:
+When the plugin is enabled, Hermes adds the manifest's recommended defaults to the active profile's plugin entry. Existing keys are never replaced, and the generated five-digit fingerprint seed is reused on later enable or update operations. This requires Hermes plugin manifest version 2 support.
+
+The resulting configuration can be customized under the plugin entry:
 
 ```yaml
 plugins:
@@ -79,13 +81,13 @@ plugins:
         user_data_dir: ~/.hermes/profiles/<profile>/browser-profiles/cloakbrowser
         headless: false
         humanize: true
-        human_preset: default
+        human_preset: careful
         stealth_args: true
         geoip: false
         # Optional fingerprint identity seed. Current plugin maps this to
         # args: ["--fingerprint=<seed>"] because current public Python docs do
         # not document a first-class fingerprint_seed launch kwarg.
-        # fingerprint_seed: "stable-profile-a"
+        fingerprint_seed: "12345"
         args: []
         # Optional strings: omit when unset.
         # proxy: ""
@@ -102,10 +104,10 @@ plugins:
 Install the CloakBrowser SDK into the Hermes runtime environment used by the target profile:
 
 ```bash
-~/.local/share/uv/tools/hermes-agent/bin/python -m pip install cloakbrowser
+~/.local/share/uv/tools/hermes-agent/bin/python -m pip install 'cloakbrowser>=0.4.10'
 ```
 
-If your Hermes install uses a different venv, run `python -m pip install cloakbrowser` with that Hermes runtime's Python.
+If your Hermes install uses a different venv, run `python -m pip install 'cloakbrowser>=0.4.10'` with that Hermes runtime's Python.
 
 `auto_acknowledge_banner` writes a fresh integer Unix timestamp to CloakBrowser's `.welcome_shown` marker in `cloakbrowser.download.get_cache_dir()` before SDK launch. Marker write failures are ignored so launch is not blocked.
 

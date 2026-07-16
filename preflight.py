@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from dataclasses import dataclass, field
+from importlib import metadata
 
 try:
     from .config import ConfigResult
@@ -22,6 +24,7 @@ PERSISTENT_PROFILE_COLLISION_MESSAGE = (
     "same-profile sharing works only inside one Hermes process; "
     "close other Hermes/CloakBrowser sessions for this profile or use a different user_data_dir"
 )
+MINIMUM_SDK_VERSION = (0, 4, 10)
 
 
 def detect_persistent_profile_collision(exc: BaseException) -> str | None:
@@ -49,6 +52,15 @@ def sdk_available() -> bool:
         return False
 
 
+def sdk_version() -> tuple[int, ...] | None:
+    try:
+        raw = metadata.version("cloakbrowser")
+    except metadata.PackageNotFoundError:
+        return None
+    match = re.match(r"^(\d+(?:\.\d+)*)", raw)
+    return tuple(int(part) for part in match.group(1).split(".")) if match else None
+
+
 def check(config_result: ConfigResult) -> PreflightResult:
     errors = list(config_result.errors)
     warnings = list(config_result.warnings)
@@ -56,4 +68,13 @@ def check(config_result: ConfigResult) -> PreflightResult:
         return PreflightResult(False, errors, warnings)
     if not sdk_available():
         errors.append("cloakbrowser SDK is not importable")
+    else:
+        version = sdk_version()
+        if version is not None and version < MINIMUM_SDK_VERSION:
+            required = ".".join(str(part) for part in MINIMUM_SDK_VERSION)
+            installed = ".".join(str(part) for part in version)
+            errors.append(
+                f"cloakbrowser SDK {installed} is too old; install cloakbrowser>={required} "
+                "for correct humanized iframe interactions"
+            )
     return PreflightResult(not errors, errors, warnings)

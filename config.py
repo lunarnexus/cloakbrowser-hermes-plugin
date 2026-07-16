@@ -112,7 +112,10 @@ def _runtime_config(raw: dict[str, Any]) -> dict[str, Any]:
     entry = entries.get(PLUGIN_NAME, {}) if isinstance(entries, dict) else {}
     nested = entry.get("config") if isinstance(entry, dict) else None
     if isinstance(nested, dict):
-        return nested
+        effective = dict(nested)
+        if "timezone" not in effective and raw.get("timezone") not in (None, ""):
+            effective["timezone"] = raw["timezone"]
+        return effective
     return raw
 
 

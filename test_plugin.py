@@ -15,6 +15,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 BROWSER_NAMES = [
@@ -30,6 +31,22 @@ BROWSER_NAMES = [
     "browser_dialog",
     "browser_vision",
 ]
+
+
+def test_manifest_declares_enable_time_config_defaults():
+    manifest = yaml.safe_load(Path(__file__).with_name("plugin.yaml").read_text())
+
+    assert manifest["manifest_version"] == 2
+    assert manifest["config_defaults"] == {
+        "user_data_dir": {"$profile_path": "browser-profiles/cloakbrowser"},
+        "headless": False,
+        "humanize": True,
+        "human_preset": "careful",
+        "stealth_args": True,
+        "fingerprint_seed": {"$random_digits": 5},
+        "geoip": False,
+        "args": [],
+    }
 
 
 class FakeCtx:
@@ -136,6 +153,11 @@ def plugin(monkeypatch, tmp_path):
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(
+        module.preflight,
+        "sdk_version",
+        lambda: module.preflight.MINIMUM_SDK_VERSION,
+    )
     return module
 
 
@@ -195,6 +217,26 @@ def test_config_parses_plugin_entry_runtime_options(plugin, tmp_path):
     assert parsed.settings.to_sdk_options()["chromium_sandbox"] is False
     assert "allow_tool_override" not in parsed.settings.to_sdk_options()
     assert "geoip requires proxy" in "; ".join(parsed.warnings)
+
+
+def test_config_inherits_hermes_timezone_when_plugin_omits_it(plugin, tmp_path):
+    parsed = plugin.config.load_config(
+        FakeCtx(
+            {
+                "timezone": "America/Indiana/Indianapolis",
+                "plugins": {
+                    "entries": {
+                        "cloakbrowser-hermes-plugin": {
+                            "config": {"user_data_dir": str(tmp_path / "profile")}
+                        }
+                    }
+                },
+            }
+        )
+    )
+
+    assert parsed.valid is True
+    assert parsed.settings.timezone == "America/Indiana/Indianapolis"
 
 
 def test_config_omits_viewport_by_default_for_sdk_parity(plugin, tmp_path):
@@ -3192,3 +3234,16 @@ def test_preflight_fails_closed_for_invalid_config_even_when_sdk_exists(
     status = ctx.registered_commands[0]["handler"]("status")
     assert "ready: False" in status
     assert "dedicated CloakBrowser profile" in status
+
+
+def test_preflight_rejects_sdk_without_iframe_humanize_fix(plugin, monkeypatch, tmp_path):
+    monkeypatch.setattr(plugin.preflight, "sdk_available", lambda: True)
+    monkeypatch.setattr(plugin.preflight, "sdk_version", lambda: (0, 4, 5))
+    config_result = plugin.config.load_config(
+        FakeCtx({"user_data_dir": str(tmp_path / "profile")})
+    )
+
+    result = plugin.preflight.check(config_result)
+
+    assert result.ok is False
+    assert "install cloakbrowser>=0.4.10" in "; ".join(result.errors)

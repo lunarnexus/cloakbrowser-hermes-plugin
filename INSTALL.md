@@ -11,14 +11,16 @@ Install the `cloakbrowser` Python package into the same Python environment that 
 Example install into the Hermes-managed runtime shown in this repo's docs:
 
 ```bash
-~/.local/share/uv/tools/hermes-agent/bin/python -m pip install cloakbrowser
+~/.local/share/uv/tools/hermes-agent/bin/python -m pip install 'cloakbrowser>=0.4.10'
 ```
 
-If your Hermes install uses a different runtime, run `python -m pip install cloakbrowser` with that Hermes runtime's Python.
+If your Hermes install uses a different runtime, run `python -m pip install 'cloakbrowser>=0.4.10'` with that Hermes runtime's Python. Version 0.4.10 is required because it fixes humanized interactions inside iframes, including embedded challenge and authentication UI.
 
 Do not treat a generic `python3` import check as proof that Hermes can import the package. Runtime verification happens later from inside a fresh Hermes session.
 
 ## 2) Install the Hermes plugin
+
+This plugin requires Hermes plugin manifest version 2 support so enablement can initialize profile-scoped defaults.
 
 Preferred install path:
 
@@ -44,7 +46,7 @@ Start a new Hermes session after install or update.
 
 ## 3) Configure plugin options
 
-Configure under `plugins.entries.cloakbrowser-hermes-plugin.config`:
+Hermes fills missing values under `plugins.entries.cloakbrowser-hermes-plugin.config` when the plugin is enabled. Customize them there as needed:
 
 ```yaml
 plugins:
@@ -56,13 +58,13 @@ plugins:
         user_data_dir: ~/.hermes/profiles/<profile>/browser-profiles/cloakbrowser
         headless: false
         humanize: true
-        human_preset: default
+        human_preset: careful
         stealth_args: true
         geoip: false
         # Optional fingerprint identity seed. Current plugin maps this to
         # args: ["--fingerprint=<seed>"] because current public Python docs do
         # not document a first-class fingerprint_seed launch kwarg.
-        # fingerprint_seed: "stable-profile-a"
+        fingerprint_seed: "12345"
         args: []
         # Optional strings: omit when unset.
         # proxy: ""
